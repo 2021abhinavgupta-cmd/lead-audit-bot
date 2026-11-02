@@ -1138,6 +1138,7 @@ function App() {
             if (recovered) {
               finishAudit({
                 email: recovered.target_email,
+                extra_emails: recovered.extra_emails || [],
                 subject: recovered.subject,
                 body: recovered.body,
                 image_url: recovered.image_url || null,
@@ -1213,6 +1214,7 @@ function App() {
       if (recovered) {
         finishAudit({
           email: recovered.target_email,
+          extra_emails: recovered.extra_emails || [],
           subject: recovered.subject,
           body: recovered.body,
           image_url: recovered.image_url || null,
@@ -1459,6 +1461,8 @@ function App() {
     try {
       const result = await sendWithAcknowledgement({
         email: lead.auditData.email,
+        // People from the lead's contact page who share this email's To line.
+        extra_emails: lead.auditData.extra_emails || [],
         subject: lead.auditData.subject,
         body: lead.auditData.body,
         company: lead.Company,
@@ -1495,6 +1499,7 @@ function App() {
     try {
       const result = await sendWithAcknowledgement({
         email: draft.target_email,
+        extra_emails: draft.extra_emails || [],
         subject: draft.subject,
         body: draft.body,
         company: draft.company,
@@ -1557,6 +1562,7 @@ function App() {
       try {
         await axios.post(`${API_BASE}/api/send`, {
           email: draft.target_email,
+          extra_emails: draft.extra_emails || [],
           subject: draft.subject,
           body: draft.body,
           company: draft.company,
@@ -2108,7 +2114,7 @@ function App() {
                 )}
                 {lead.auditState === 'sent' && lead.auditData && (
                   <div style={{ marginTop: '12px', padding: '8px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                    <p style={{ color: '#059669', marginBottom: '4px' }}><strong>To:</strong> {lead.auditData.email}</p>
+                    <p style={{ color: '#059669', marginBottom: '4px' }}><strong>To:</strong> {[lead.auditData.email, ...(lead.auditData.extra_emails || [])].join(', ')}</p>
                     <p style={{ color: '#475569', fontSize: '0.9em' }}><strong>From:</strong> {lead.auditData.sender_email || 'System'}</p>
                   </div>
                 )}
@@ -2307,6 +2313,29 @@ function App() {
                       </div>
                     )}
                     <p className="target-email"><strong>To:</strong> {lead.auditData.email || 'Email not found (will fail)'}</p>
+                    {(lead.auditData.extra_emails || []).length > 0 && (
+                      <div style={{ margin: '0 0 8px', fontSize: '0.85em', color: '#475569' }}>
+                        <span>Also found on their contact page, added to this email: </span>
+                        {lead.auditData.extra_emails.map(extra => (
+                          <span key={extra} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', margin: '2px 6px 2px 0', padding: '2px 8px', borderRadius: '999px', background: 'rgba(99, 102, 241, 0.12)' }}>
+                            {extra}
+                            <button
+                              type="button"
+                              title="Don't send to this address"
+                              style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#64748b', padding: 0 }}
+                              onClick={() => {
+                                const newLeads = [...leads];
+                                newLeads[i].auditData = {
+                                  ...newLeads[i].auditData,
+                                  extra_emails: newLeads[i].auditData.extra_emails.filter(e => e !== extra),
+                                };
+                                setLeads(newLeads);
+                              }}
+                            >×</button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     <label className="subject-label">Subject</label>
                     <input
                       className="subject-editor"
@@ -2937,6 +2966,24 @@ function App() {
               <div className="lead-details">
                 <p><strong>URL:</strong> <a href={draft.website} target="_blank" rel="noreferrer">{draft.website}</a></p>
                 <p><strong>To:</strong> {draft.target_email || 'Missing email'}</p>
+                {(draft.extra_emails || []).length > 0 && (
+                  <p style={{ fontSize: '0.85em', color: '#475569' }}>
+                    <span>Also on their contact page, added to this email: </span>
+                    {draft.extra_emails.map(extra => (
+                      <span key={extra} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', margin: '2px 6px 2px 0', padding: '2px 8px', borderRadius: '999px', background: 'rgba(99, 102, 241, 0.12)' }}>
+                        {extra}
+                        <button
+                          type="button"
+                          title="Don't send to this address"
+                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#64748b', padding: 0 }}
+                          onClick={() => setDrafts(prev => prev.map(d => d.id === draft.id
+                            ? { ...d, extra_emails: (d.extra_emails || []).filter(e => e !== extra) }
+                            : d))}
+                        >×</button>
+                      </span>
+                    ))}
+                  </p>
+                )}
               </div>
 
               {draft.review_warnings && draft.review_warnings.length > 0 && (
@@ -3432,7 +3479,7 @@ function App() {
                     </span>
                   )}
                 </h4>
-                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>To: {log.target_email} • From: {log.sender_email}</p>
+                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>To: {[log.target_email, ...(log.extra_emails || [])].join(', ')} • From: {log.sender_email}</p>
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                 {log.followup_of == null && followedUpIds.has(log.id) && (
                   <span title="A follow-up has already been sent for this email" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', color: '#c4b5fd', background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: '999px', padding: '3px 10px' }}>

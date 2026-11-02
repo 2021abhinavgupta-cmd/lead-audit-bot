@@ -38,6 +38,14 @@ REPLY_TO_EMAIL = os.getenv("REPLY_TO_EMAIL") or FROM_EMAIL
 # (SES never writes to a Sent folder). Added as an envelope recipient only, never
 # as a header, so the lead cannot see it. Unset -> nothing changes.
 BCC_EMAIL = (os.getenv("BCC_EMAIL") or "").strip()
+# Other addresses found on the lead's own contact/about pages that are added to
+# the same email's To line (enrichment/decision_maker.py:find_extra_recipients).
+# 0 turns it off. Kept small on purpose: every extra recipient is another
+# mailbox that can bounce or mark the mail as spam.
+try:
+    EXTRA_RECIPIENTS_MAX = max(0, int(os.getenv("EXTRA_RECIPIENTS_MAX", "2")))
+except ValueError:
+    EXTRA_RECIPIENTS_MAX = 2
 
 # Which transport actually delivers the mail: "ses" (default) or "gmail".
 # Gmail here means an authenticated Google Workspace mailbox over SMTP —

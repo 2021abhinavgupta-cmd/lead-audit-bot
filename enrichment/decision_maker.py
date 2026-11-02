@@ -44,6 +44,44 @@ def _is_junk_email(email: str) -> bool:
     return local_part in _JUNK_LOCAL_PARTS
 
 
+# Real, deliverable mailboxes that are still the wrong people to pitch a website
+# audit to. Only applied to the EXTRA recipients; the primary contact keeps its
+# own, older rules.
+_NOT_A_PITCH_TARGET = {
+    "career", "careers", "jobs", "job", "hr", "recruitment", "recruiter", "hiring",
+    "billing", "accounts", "accounting", "invoice", "invoices", "payments", "refund",
+    "legal", "privacy", "compliance", "press", "pr", "complaints", "grievance",
+    "unsubscribe", "bounce", "admin", "root",
+}
+
+# Personal mailboxes small businesses really do publish as their contact. They
+# are accepted as extras only when found on a contact/about/team page, never
+# from a homepage footer (where a web developer's own address often sits).
+_FREE_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.in", "yahoo.co.in",
+    "outlook.com", "hotmail.com", "live.com", "rediffmail.com", "icloud.com",
+    "proton.me", "protonmail.com",
+}
+
+_JUNK_EMAIL_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".svg", ".webp", ".mp4",
+    "sentry.io", "example.com",
+)
+
+# Pages that list the people/mailboxes to write to.
+_CONTACT_PAGE_PATHS = (
+    "/contact", "/contact-us", "/contact-us/", "/contactus", "/get-in-touch",
+    "/about", "/about-us", "/team", "/our-team",
+)
+
+
+def _same_site(email_domain: str, site_domain: str) -> bool:
+    """True when the address is on the lead's own domain (or a subdomain of it)."""
+    email_domain = email_domain.lower().lstrip(".")
+    site_domain = site_domain.lower().removeprefix("www.")
+    return email_domain == site_domain or email_domain.endswith("." + site_domain)
+
+
 # ---------------------------------------------------------------------------
 # Free email extraction — no API, no paid enrichment service
 # ---------------------------------------------------------------------------
@@ -366,7 +404,18 @@ class DecisionMaker:
         scraped_email = self._scrape_website_for_email(website, html_content)
         if scraped_email:
             # Read off the business's own site — a real published address.
-            return self._finalise(generic_name, scraped_email, "", is_guess=False)
+            result = self._finalise(generic_name, scraped_email, "", is_guess=False)
+            # Other people listed on the contact/about pages join the same
+            # email. Never for a guessed address: only a published one proves
+            # the site wants to be written to at all.
+            try:
+                result["extra_emails"] = self.find_extra_recipients(
+                    website, scraped_email, html_content=html_content
+                )
+            except Exception as e:
+                print(f"[Contact] Extra recipient lookup failed (non-fatal): {e}")
+                result["extra_emails"] = []
+            return result
 
         # Strategy 2 — LinkedIn OSINT (CEO Discovery)
         #
@@ -538,6 +587,96 @@ class DecisionMaker:
             return validate_email(valid_emails[0], check_deliverability=False).normalized
         except EmailNotValidError:
             return ""
+
+    # ------------------------------------------------------------------
+    # Extra recipients from the contact page
+    # ------------------------------------------------------------------
+
+    def find_extra_recipients(self, base_url: str, primary: str, html_content: str | None = None) -> list[str]:
+        """
+        Other mailboxes the lead publishes on its own contact/about/team pages,
+        to be added to the same email's To line next to *primary*.
+
+        Kept deliberately conservative, because every extra address is one more
+        place a bounce or a spam report can come from:
+          - the address must be on the lead's own domain; a personal mailbox
+            (gmail, yahoo...) counts only when it sits on a contact, about or
+            team page, never from the homepage;
+          - role mailboxes that are not buyers (careers@, billing@, legal@...)
+            and noreply-style junk are dropped;
+          - anything already on the suppression list is dropped;
+          - the format must validate, and at most config.EXTRA_RECIPIENTS_MAX
+            are returned, best first.
+        Silent by design: a page that cannot be fetched adds nothing.
+        """
+        limit = config.EXTRA_RECIPIENTS_MAX
+        if limit <= 0:
+            return []
+
+        site_domain = self._extract_domain(base_url)
+        if not site_domain:
+            return []
+
+        # (address, found_on_a_contact_page)
+        sightings: dict[str, bool] = {}
+        for address in _extract_emails_from_html(html_content or ""):
+            sightings.setdefault(address, False)
+
+        pages_read = 0
+        for path in _CONTACT_PAGE_PATHS:
+            if pages_read >= 3:
+                break
+            try:
+                response = self.client.get(urljoin(base_url, path), headers=self.headers, follow_redirects=True)
+            except Exception:
+                continue
+            if response.status_code != 200:
+                continue
+            pages_read += 1
+            for address in _extract_emails_from_html(response.text):
+                sightings[address] = True
+
+        from storage import db  # local: keeps this module importable without a database
+
+        primary_key = (primary or "").strip().lower()
+        accepted: list[str] = []
+        for address, on_contact_page in sightings.items():
+            address = address.strip().lower()
+            if address == primary_key or address in accepted:
+                continue
+            if address.endswith(_JUNK_EMAIL_SUFFIXES) or _is_junk_email(address):
+                continue
+            local_part, _, email_domain = address.partition("@")
+            if local_part in _NOT_A_PITCH_TARGET:
+                continue
+            if _same_site(email_domain, site_domain):
+                pass
+            elif email_domain in _FREE_MAIL_DOMAINS and on_contact_page:
+                pass
+            else:
+                continue
+            try:
+                address = validate_email(address, check_deliverability=False).normalized
+            except EmailNotValidError:
+                continue
+            try:
+                if db.is_suppressed(address):
+                    continue
+            except Exception:
+                pass
+            accepted.append(address)
+
+        def rank(e: str) -> int:
+            if any(kw in e for kw in ("founder", "ceo", "director", "owner")):
+                return 100
+            if any(kw in e for kw in ("marketing", "growth", "sales")):
+                return 80
+            if any(kw in e for kw in ("hello", "hi", "contact", "info")):
+                return 50
+            return 10
+
+        accepted.sort(key=rank, reverse=True)
+        return accepted[:limit]
 
     # ------------------------------------------------------------------
     # LinkedIn OSINT
@@ -787,6 +926,7 @@ class DecisionMaker:
             "title": title,
             "is_guess": is_guess,
             "domain_accepts_mail": self.domain_accepts_mail(email),
+            "extra_emails": [],
         }
 
     def _fallback_patterns(self, domain: str, generic_name: str = "Marketing Team") -> dict:
