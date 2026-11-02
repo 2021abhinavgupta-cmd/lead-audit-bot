@@ -1516,9 +1516,17 @@ function App() {
     setDrafts(newDrafts);
 
     try {
+      // Make the full audit PDF first (about a minute) so it can ride along
+      // as an attachment; the send itself then stays quick.
+      let reportJobId = '';
+      if (draft.attachFullPdf) {
+        const made = await createPdfReport({ website: draft.website, company: draft.company, apiBase: API_BASE, download: false });
+        reportJobId = made.job_id;
+      }
       const result = await sendWithAcknowledgement({
         email: draft.target_email,
         extra_emails: draft.extra_emails || [],
+        report_job_id: reportJobId,
         subject: draft.subject,
         body: draft.body,
         company: draft.company,
@@ -3084,7 +3092,16 @@ function App() {
                       <option value="small">Small PDF: email + screenshot + details</option>
                       <option value="long" disabled={!draft.website}>Long PDF: full website audit</option>
                     </select>
-                    <button className="send-btn" onClick={() => handleDraftSend(draft, i)}><Send size={18} /> Approve & Send</button>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#475569', cursor: 'pointer' }}
+                      title="Attaches the full website audit PDF to this email. Sending then takes about a minute longer while it is made. Attachments can lower inbox placement on a cold email.">
+                      <input
+                        type="checkbox"
+                        checked={!!draft.attachFullPdf}
+                        disabled={!draft.website}
+                        onChange={(ev) => setDrafts(drafts.map((d) => (d.id === draft.id ? { ...d, attachFullPdf: ev.target.checked } : d)))}
+                      />
+                      Attach full audit PDF
+                    </label>                    <button className="send-btn" onClick={() => handleDraftSend(draft, i)}><Send size={18} /> Approve & Send</button>
                   </div>
                 </div>
               )}

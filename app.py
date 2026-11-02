@@ -399,6 +399,11 @@ class SendRequest(BaseModel):
     # "use whatever the saved draft recorded"; a list, even an empty one, is
     # what the reviewer left in place after removing any they did not want.
     extra_emails: list[str] | None = None
+    # A finished /api/report job whose PDF is attached to this email as a file.
+    # The Drafts UI makes the report first (about a minute) so the send itself
+    # stays quick. An unknown or unfinished id is refused, never sent without it.
+    report_job_id: str = ""
+
 
 def _clean_extra_recipients(requested: list[str] | None, draft: dict | None, primary: str) -> list[str]:
     """
@@ -1511,6 +1516,14 @@ async def send_email(
         # captioned for what it really is in base_sender — the single
         # hardcoded "on mobile" caption used to sit above the DESKTOP image on
         # every send.
+        pdf_path = pdf_name = None
+        if req.report_job_id and import_lead is None:
+            job = _report_jobs.get(req.report_job_id)
+            if not job or job.get("status") != "done" or not os.path.exists(job.get("path", "")):
+                raise HTTPException(status_code=409, detail="The PDF report is not ready (or expired). Nothing was sent; make it again.")
+            if os.path.getsize(job["path"]) > 7 * 1024 * 1024:
+                raise HTTPException(status_code=409, detail="The PDF report is too large to attach (over 7 MB). Nothing was sent.")
+            pdf_path, pdf_name = job["path"], job.get("filename")
         image_path = None
         mobile_image_path = None
         closeup_image_path = None
@@ -1565,6 +1578,8 @@ async def send_email(
                 )
             else:
                 extra_kwargs = {"extra_to": extra_to} if extra_to else {}
+                if pdf_path:
+                    extra_kwargs.update(pdf_path=pdf_path, pdf_name=pdf_name)
                 message_id = await asyncio.to_thread(
                     ses.send_email, send_to, send_subject, send_body,   # IMPORT: stored copy for imports
                     image_path=image_path, mobile_image_path=mobile_image_path,
