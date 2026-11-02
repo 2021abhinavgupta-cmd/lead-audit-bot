@@ -2759,14 +2759,11 @@ async def draft_pdf(
         '<p class="cap">The screenshot attached to this email. The magenta box marks the problem it points at.</p>'
         f'<img src="{shot}">'
     ) if shot else ""
-    warn_html = (
-        '<h2>Review notes</h2><ul class="warn">' + "".join(f"<li>{e(w)}</li>" for w in req.review_warnings) + "</ul>"
-    ) if req.review_warnings else ""
     page = (
         '<!doctype html><meta charset="utf-8"><style>'
         '@page{size:A4;margin:0}*{box-sizing:border-box}'
         'body{font-family:Arial,Helvetica,sans-serif;color:#1e293b;margin:0}'
-        '.top{background:#0f172a;color:#fff;padding:30px 48px}.top small{color:#94a3b8;letter-spacing:.08em;font-size:11px}'
+        '.top{background:#0f172a;color:#fff;padding:26px 48px;margin:0 0 0}.top small{color:#94a3b8;letter-spacing:.08em;font-size:11px}'
         '.top h1{margin:6px 0 0;font-size:22px;line-height:1.3}'
         '.in{padding:28px 48px}h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#64748b;margin:26px 0 8px}'
         'table{border-collapse:collapse;width:100%}td{padding:5px 0;vertical-align:top;font-size:13px;border-bottom:1px solid #f1f5f9}'
@@ -2775,15 +2772,15 @@ async def draft_pdf(
         '.mail{border:1px solid #e2e8f0;border-radius:8px;padding:20px 24px;background:#f8fafc}'
         '.subj{font-weight:700;font-size:15px;margin-bottom:14px}'
         '.body{white-space:pre-wrap;font-size:14px;line-height:1.65}'
-        '.warn{font-size:12.5px;color:#b45309;padding-left:18px}.shot{page-break-inside:avoid}</style>'
+        '.shot,.mail,table{break-inside:avoid}h2{break-after:avoid}</style>'
         f'<div class="top"><small>EMAIL DRAFT</small><h1>{e(req.subject)}</h1></div><div class="in">'
         f'<h2>Details</h2><table>{rows}</table>'
         f'<div class="shot">{shot_html}</div>'
         f'<h2>The email</h2><div class="mail"><div class="subj">{e(req.subject)}</div>'
-        f'<div class="body">{e(req.body)}</div></div>{warn_html}</div>'
+        f'<div class="body">{e(req.body)}</div></div></div>'
     )
     try:
-        pdf = await reporting_report.render_pdf(page)
+        pdf = await reporting_report.render_pdf(page, margin_mm=14)
     except Exception as ex:
         print(f"[DraftPdf] failed: {ex}")
         raise HTTPException(status_code=500, detail="The PDF could not be created.")

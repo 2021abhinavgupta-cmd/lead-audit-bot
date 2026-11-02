@@ -1,4 +1,4 @@
-﻿from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient
 
 import app as app_module
 
@@ -53,7 +53,7 @@ def test_small_pdf_inlines_the_screenshot_and_ignores_path_tricks(monkeypatch, t
             "review_warnings": ["Check the 7 broken links"], "sector": "agriculture", "niche": "Dairy"}
     assert _client().post("/api/draft-pdf", json=body, headers=_H).status_code == 200
     assert "data:image/jpeg;base64," in seen["html"]
-    assert "Check the 7 broken links" in seen["html"] and "agriculture / Dairy" in seen["html"]
+    assert "Check the 7 broken links" not in seen["html"] and "agriculture / Dairy" in seen["html"]
 
     body["image_url"] = "/screenshots/../secret.txt"
     _client().post("/api/draft-pdf", json=body, headers=_H)
