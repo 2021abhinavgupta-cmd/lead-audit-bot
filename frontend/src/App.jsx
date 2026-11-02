@@ -3049,6 +3049,16 @@ function App() {
                   />
                   <div className="action-buttons" style={{marginTop: '16px'}}>
                     <button className="reject-btn" onClick={() => handleDraftDelete(draft.id)}><X size={18} /> Discard</button>
+                    <button
+                      className="reject-btn"
+                      disabled={!draft.website || !!reportBusy[draft.website]}
+                      style={{ cursor: reportBusy[draft.website] ? 'wait' : 'pointer' }}
+                      title="Download the full design review of this website as a PDF. Takes about a minute."
+                      onClick={() => handleReport({ Website: draft.website, Company: draft.company })}
+                    >
+                      {reportBusy[draft.website] ? <Loader2 size={18} className="spin" /> : <FileText size={18} />}
+                      {reportBusy[draft.website] ? ' Making PDF...' : ' Download PDF'}
+                    </button>
                     <button className="send-btn" onClick={() => handleDraftSend(draft, i)}><Send size={18} /> Approve & Send</button>
                   </div>
                 </div>
