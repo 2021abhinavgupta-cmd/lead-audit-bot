@@ -1,4 +1,4 @@
-﻿"""
+"""
 Builds the design and conversion report from what reporting/collect.py measured.
 
 build_report() and render_html() are pure (no network, no browser), so what the
@@ -293,7 +293,7 @@ def render_html(report: dict) -> str:
 
 # --------------------------------------------------------------------------- PDF
 
-async def render_pdf(html: str) -> bytes:
+async def render_pdf(html: str, margin_mm: int = 0) -> bytes:
     """HTML to an A4 PDF with Chromium. Holds the shared browser slot."""
     from playwright.async_api import async_playwright
     sem = await _acquire_playwright_slot()
@@ -304,7 +304,7 @@ async def render_pdf(html: str) -> bytes:
                 page = await browser.new_page()
                 await page.set_content(html, wait_until="load")
                 return await page.pdf(format="A4", print_background=True,
-                                      margin={"top": "0", "right": "0", "bottom": "0", "left": "0"})
+                                      margin={"top": f"{margin_mm}mm", "right": "0", "bottom": f"{margin_mm}mm", "left": "0"})
             finally:
                 await browser.close()
     finally:
