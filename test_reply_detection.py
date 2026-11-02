@@ -269,6 +269,28 @@ def test_a_real_reply_outranks_an_earlier_auto_reply(imap, temp_db):
     assert temp_db.get_email_history()[0]["replied"] is True
 
 
+def test_our_own_bcc_copies_are_never_counted_as_replies(imap, temp_db, monkeypatch):
+    """
+    BCC_EMAIL puts a copy of every send in this mailbox, From our own sending
+    address. With an earlier send to an @mmga.agency address in history, the
+    sender-address fallback used to credit each copy as a reply (33 false
+    replies on the first live scan).
+    """
+    monkeypatch.setattr(config, "FROM_EMAIL", "kshitij@mmga.agency")
+    monkeypatch.setattr(config, "REPLY_TO_EMAIL", "marketing@mmga.agency")
+    monkeypatch.setattr(config, "BCC_EMAIL", "marketing@mmga.agency")
+    temp_db.log_email("Test", "mmga.agency", "kshitij@mmga.agency", "kshitij@mmga.agency", "S", "B",
+                      message_id="<sent@x.com>")
+    FakeIMAP.messages = [
+        _raw(**{"Message-ID": "<bcc1@mmga.agency>", "From": "Kshitij <kshitij@mmga.agency>",
+                "Subject": "Quick question about your website"}),
+    ]
+
+    summary = check_replies()
+    assert summary["replies"] == 0
+    assert temp_db.get_email_history()[0]["replied"] is False
+
+
 # ---------------------------------------------------------------------------
 # Rescanning
 # ---------------------------------------------------------------------------

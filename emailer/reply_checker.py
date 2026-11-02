@@ -354,6 +354,12 @@ def check_replies(lookback_days: int | None = None) -> dict:
         if address and address not in sent_by_address:
             sent_by_address[address] = row
 
+    own_addresses = {
+        (a or "").strip().lower()
+        for a in (config.FROM_EMAIL, config.REPLY_TO_EMAIL, config.BCC_EMAIL, user)
+        if a
+    }
+
     summary = {"scanned": 0, "replies": 0, "auto_replies": 0, "bounces": 0, "unmatched": 0, "unsubscribe_requests": 0}
 
     connection = imaplib.IMAP4_SSL(host, IMAP_PORT)
@@ -377,6 +383,14 @@ def check_replies(lookback_days: int | None = None) -> dict:
                 headers = _headers_from_raw(fetched[0][1])
                 reply_message_id = (headers.get("message-id") or "").strip()
                 sender = parseaddr(headers.get("from", ""))[1].lower()
+
+                # Our own mail is never a reply. BCC_EMAIL copies of every send
+                # land in this mailbox looking like they came from FROM_EMAIL,
+                # and the sender-address fallback below would credit them to
+                # any send that went to one of our own addresses.
+                if sender and sender in own_addresses:
+                    summary["unmatched"] += 1
+                    continue
 
                 bounce = is_bounce(headers)
                 auto = False if bounce else is_auto_reply(headers)
