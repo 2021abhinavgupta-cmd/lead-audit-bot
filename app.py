@@ -2689,6 +2689,49 @@ async def report_pdf(
     return FileResponse(job["path"], media_type="application/pdf", filename=job.get("filename") or "report.pdf")
 
 
+class DraftPdfRequest(BaseModel):
+    subject: str = ""
+    body: str = ""
+    company: str = ""
+    website: str = ""
+    target_email: str = ""
+    extra_emails: list[str] = []
+
+
+@app.post("/api/draft-pdf")
+async def draft_pdf(
+    req: DraftPdfRequest,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(10, 60)),
+):
+    """The email exactly as it stands in the draft editor, as a PDF."""
+    if not (req.subject.strip() or req.body.strip()):
+        raise HTTPException(status_code=400, detail="This draft is empty.")
+    e = lambda s: _html.escape(s or "")
+    to = ", ".join(a for a in [req.target_email, *req.extra_emails] if a)
+    rows = "".join(
+        f'<tr><td class="k">{k}</td><td>{e(v)}</td></tr>'
+        for k, v in (("Subject", req.subject), ("To", to), ("Company", req.company), ("Website", req.website))
+        if v
+    )
+    page = (
+        '<!doctype html><meta charset="utf-8"><style>'
+        '@page{size:A4;margin:0}body{font-family:Arial,Helvetica,sans-serif;color:#1e293b;margin:0;padding:48px 56px}'
+        'table{border-collapse:collapse;margin-bottom:24px;width:100%}td{padding:6px 0;vertical-align:top;font-size:13px}'
+        '.k{color:#64748b;width:90px}hr{border:0;border-top:1px solid #e2e8f0;margin:0 0 24px}'
+        '.body{white-space:pre-wrap;font-size:14px;line-height:1.65}</style>'
+        f'<table>{rows}</table><hr><div class="body">{e(req.body)}</div>'
+    )
+    try:
+        pdf = await reporting_report.render_pdf(page)
+    except Exception as ex:
+        print(f"[DraftPdf] failed: {ex}")
+        raise HTTPException(status_code=500, detail="The PDF could not be created.")
+    name = re.sub(r"[^A-Za-z0-9]+", "-", req.company or "draft").strip("-") or "draft"
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-email.pdf"'})
+
+
 # Mount screenshots folder
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")

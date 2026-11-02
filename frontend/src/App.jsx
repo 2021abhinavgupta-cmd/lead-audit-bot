@@ -3057,7 +3057,30 @@ function App() {
                       onClick={() => handleReport({ Website: draft.website, Company: draft.company })}
                     >
                       {reportBusy[draft.website] ? <Loader2 size={18} className="spin" /> : <FileText size={18} />}
-                      {reportBusy[draft.website] ? ' Making PDF...' : ' Download PDF'}
+                      {reportBusy[draft.website] ? ' Making PDF...' : ' Website PDF'}
+                    </button>
+                    <button
+                      className="reject-btn"
+                      title="Download this email (subject and body as edited above) as a PDF."
+                      onClick={async () => {
+                        try {
+                          const res = await axios.post(`${API_BASE}/api/draft-pdf`, {
+                            subject: draft.subject, body: draft.body, company: draft.company,
+                            website: draft.website, target_email: draft.target_email,
+                            extra_emails: draft.extra_emails || [],
+                          }, { responseType: 'blob' });
+                          const url = URL.createObjectURL(res.data);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${(draft.company || 'draft').replace(/[^A-Za-z0-9]+/g, '-')}-email.pdf`;
+                          document.body.appendChild(a); a.click(); a.remove();
+                          setTimeout(() => URL.revokeObjectURL(url), 60000);
+                        } catch (err) {
+                          alert('Email PDF failed: ' + (err?.message || 'unknown error'));
+                        }
+                      }}
+                    >
+                      <FileText size={18} /> Email PDF
                     </button>
                     <button className="send-btn" onClick={() => handleDraftSend(draft, i)}><Send size={18} /> Approve & Send</button>
                   </div>
