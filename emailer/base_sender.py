@@ -18,7 +18,7 @@ from html import escape as html_escape
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
-from email.utils import make_msgid, formatdate
+from email.utils import make_msgid, formatdate, getaddresses
 from urllib.parse import quote
 
 import config
@@ -67,13 +67,22 @@ class BaseSender:
         return config.REPLY_TO_EMAIL or self.from_email
 
     @staticmethod
-    def _envelope_recipients(to_email: str) -> list[str]:
-        """The real recipient, plus the configured BCC copy as an envelope-only
-        address (no header carries it, so the lead never sees it)."""
+    def _envelope_recipients(to_email: str, msg=None) -> list[str]:
+        """The real recipients, plus the configured BCC copy as an envelope-only
+        address (no header carries it, so the lead never sees it).
+
+        When *msg* is given, every address on its To header is a recipient, so
+        a message addressed to several people is delivered to all of them by
+        both transports from the one place that decides it."""
+        recipients = [to_email]
+        if msg is not None:
+            listed = [addr for _, addr in getaddresses(msg.get_all("To", []))]
+            if listed:
+                recipients = listed
         bcc = config.BCC_EMAIL
-        if bcc and bcc.lower() != (to_email or "").lower():
-            return [to_email, bcc]
-        return [to_email]
+        if bcc and bcc.lower() not in {r.lower() for r in recipients}:
+            recipients.append(bcc)
+        return recipients
 
     # --- transport hook -------------------------------------------------
 
@@ -577,7 +586,7 @@ class BaseSender:
     def _build_initial_message(
         self, to_email: str, subject: str, body: str, message_id: str,
         image_path: str = None, mobile_image_path: str = None,
-        closeup_image_path: str = None,
+        closeup_image_path: str = None, extra_to: list[str] | None = None,
     ) -> MIMEMultipart:
         """
         Build the first-touch message as multipart/mixed raw MIME carrying
@@ -601,7 +610,10 @@ class BaseSender:
         # than emit a literal "None" for it.
         if self.reply_to:
             msg["Reply-To"] = self.reply_to
-        msg["To"] = to_email
+        for address in [to_email, *(extra_to or [])]:
+            if "\r" in address or "\n" in address:
+                raise ValueError("recipient must not contain CR or LF")
+        msg["To"] = ", ".join([to_email, *(extra_to or [])])
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = message_id
         for header, value in self._unsubscribe_headers(to_email).items():
@@ -767,11 +779,16 @@ class BaseSender:
     # --- sending --------------------------------------------------------
 
     def send_email(self, to_email: str, subject: str, body: str, image_path: str = None,
-                   mobile_image_path: str = None, closeup_image_path: str = None):
+                   mobile_image_path: str = None, closeup_image_path: str = None,
+                   extra_to: list[str] | None = None):
         """
         Send the first-touch cold email.
 
         Args:
+            extra_to:           Other people on the same To line (addresses from
+                the lead's contact page). Anyone on the suppression list is
+                dropped here, at the last moment, so an opt-out recorded after
+                the draft was made still wins.
             image_path:         Desktop screenshot, the one carrying the marked box.
             mobile_image_path:  Mobile screenshot. Optional and independent —
                 any of the three may be given, and the captions in the
@@ -791,12 +808,23 @@ class BaseSender:
             print(f"Skipping {to_email}: on the unsubscribe/suppression list")
             return False
 
+        extras = []
+        for address in extra_to or []:
+            address = (address or "").strip()
+            if not address or address.lower() == to_email.strip().lower() or address.lower() in {e.lower() for e in extras}:
+                continue
+            if db.is_suppressed(address):
+                print(f"Dropping {address} from the To line: on the unsubscribe/suppression list")
+                continue
+            extras.append(address)
+
         return self._send_with_retry(
             to_email,
             lambda message_id: self._build_initial_message(
                 to_email, subject, body, message_id,
                 image_path=image_path, mobile_image_path=mobile_image_path,
                 closeup_image_path=closeup_image_path,
+                **({"extra_to": extras} if extras else {}),
             ),
         )
 

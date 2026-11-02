@@ -394,6 +394,35 @@ class SendRequest(BaseModel):
     # pipeline's draft lookup, screenshots, Sheets update and draft deletion.
     # Existing callers never send it, so their behaviour is unchanged.
     import_lead_id: int | None = None
+    # Other people on the same To line (addresses found on the lead's contact
+    # page, see enrichment/decision_maker.py:find_extra_recipients). None means
+    # "use whatever the saved draft recorded"; a list, even an empty one, is
+    # what the reviewer left in place after removing any they did not want.
+    extra_emails: list[str] | None = None
+
+def _clean_extra_recipients(requested: list[str] | None, draft: dict | None, primary: str) -> list[str]:
+    """
+    The extra To recipients to actually use: the request's list when the client
+    sent one, else the draft's. Each must be a valid address, not the primary,
+    not on the suppression list, and the total is capped at
+    config.EXTRA_RECIPIENTS_MAX so an API caller cannot turn one email into a
+    blast.
+    """
+    from email_validator import validate_email, EmailNotValidError
+
+    candidates = requested if requested is not None else ((draft or {}).get("extra_emails") or [])
+    cleaned: list[str] = []
+    for address in candidates:
+        try:
+            address = validate_email((address or "").strip(), check_deliverability=False).normalized.lower()
+        except EmailNotValidError:
+            continue
+        if address == (primary or "").strip().lower() or address in cleaned:
+            continue
+        if db.is_suppressed(address):
+            continue
+        cleaned.append(address)
+    return cleaned[: config.EXTRA_RECIPIENTS_MAX]
 
 maps_scraper = GoogleMapsScraper()
 b2b_directory_scrapers = {
@@ -1105,6 +1134,8 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
         contact = dm.get("name", "")
         email = dm.get("email", "")
 
+        extra_emails = dm.get("extra_emails") or []
+
         dm_cost = dm.get("cost", 0.0)
         if dm_cost:
             await asyncio.to_thread(db.log_cost, "AI Web Fetch", dm_cost, description=f"Contact discovery for {req.company}")
@@ -1163,10 +1194,12 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
             sector=req.sector,
             niche=req.sector_detail,
             include_automation_pitch=req.include_automation_pitch,
+            extra_emails=extra_emails,
         )
 
         result = {
             "email": email,
+            "extra_emails": extra_emails,
             "sender_email": config.FROM_EMAIL,
             "subject": subject,
             "body": body,
@@ -1463,6 +1496,13 @@ async def send_email(
                     },
                 )
 
+        # Other people from the lead's contact page share this one email's To
+        # line. Audit sends only: an import lead is one stored contact.
+        extra_to = (
+            [] if import_lead is not None
+            else await asyncio.to_thread(_clean_extra_recipients, req.extra_emails, draft, send_to)
+        )
+
         # Use existing screenshots (same collision-safe names
         # generate_audit_screenshot wrote). All three captures are attached
         # now: the desktop one carries the marked evidence, the close up is a
@@ -1524,10 +1564,12 @@ async def send_email(
                     import_lead["html_body"], designed_images,
                 )
             else:
+                extra_kwargs = {"extra_to": extra_to} if extra_to else {}
                 message_id = await asyncio.to_thread(
                     ses.send_email, send_to, send_subject, send_body,   # IMPORT: stored copy for imports
                     image_path=image_path, mobile_image_path=mobile_image_path,
                     closeup_image_path=closeup_image_path,
+                    **extra_kwargs,
                 )
         except Exception as send_error:
             if import_lead is not None:   # IMPORT: keep the real transport error on the lead
@@ -1594,6 +1636,7 @@ async def send_email(
                 variant=variant_sent,
                 sector=(draft.get("sector") or "") if draft else "",
                 niche=(draft.get("niche") or "") if draft else "",
+                extra_emails=extra_to,
             )
 
             if import_lead is not None:   # IMPORT: link the history row (status was set to sent before sending)
@@ -1648,6 +1691,15 @@ async def unsubscribe(request: Request, email: str = ""):
         )
 
     await asyncio.to_thread(db.add_suppression, email, "list-unsubscribe")
+    # One email can go to several people (the lead's contact page addresses
+    # share its To line) but carries a single unsubscribe link. Opting out of
+    # that message opts out everyone who received it, so none of them is
+    # mailed again by another audit that finds the same addresses.
+    try:
+        for co_recipient in await asyncio.to_thread(db.get_co_recipients, email):
+            await asyncio.to_thread(db.add_suppression, co_recipient, "list-unsubscribe-shared")
+    except Exception as e:
+        print(f"Error suppressing co-recipients of {email}: {e}")
     try:
         row = await asyncio.to_thread(sheets.find_row_by_email, email)
         if row:

@@ -324,6 +324,19 @@ def init_db():
         cursor.execute("ALTER TABLE import_leads ADD COLUMN text_findings TEXT")
         cursor.execute("PRAGMA user_version = 16")
 
+    # Schema v17 (2026-11-02): other addresses from the lead's contact page that
+    # ride in the same email's To line (JSON list; NULL = none). Stored on the
+    # draft (what will be sent) and on the history row (what was sent).
+    if schema_version < 17:
+        # Skip a column that is already there, so a migration that was
+        # interrupted half way (or re-run on a database restored from backup)
+        # finishes instead of failing on "duplicate column name".
+        for table in ("email_drafts", "email_history"):
+            existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+            if "extra_emails" not in existing:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN extra_emails TEXT")
+        cursor.execute("PRAGMA user_version = 17")
+
     conn.commit()
     conn.close()
 
@@ -338,9 +351,10 @@ def log_cost(category: str, cost: float, description: str = ""):
     conn.commit()
     conn.close()
 
-def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = "", followup_of: int | None = None, sector: str = "", niche: str = ""):
+def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = "", followup_of: int | None = None, sector: str = "", niche: str = "", extra_emails: list[str] | None = None):
     """
-    Record a real send.
+    Record a real send. `extra_emails` are the other To recipients of the same
+    message (None/empty = a single recipient).
 
     `variant` exists so engagement can later be attributed to a copy decision
     rather than to nothing — see get_variant_performance(). The word count is
@@ -358,9 +372,10 @@ def log_email(company: str, website: str, target_email: str, sender_email: str, 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count, followup_of, sector, niche) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count, followup_of, sector, niche, extra_emails) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (company, website, target_email, sender_email, subject, body, message_id,
-         variant or None, len((body or "").split()), followup_of, sector or None, niche or None)
+         variant or None, len((body or "").split()), followup_of, sector or None, niche or None,
+         json.dumps(extra_emails) if extra_emails else None)
     )
     conn.commit()
     conn.close()
@@ -588,6 +603,41 @@ def _guess_category(row: dict) -> tuple[str | None, bool]:
     return None, False
 
 
+def _decode_email_list(raw) -> list[str]:
+    """extra_emails column (JSON text, or NULL) -> list; never raises."""
+    try:
+        value = json.loads(raw) if raw else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
+def get_co_recipients(email: str) -> list[str]:
+    """
+    Every other address that was on the same email's To line as *email* in any
+    past send. Used when someone unsubscribes: a shared message has one
+    unsubscribe link, so opting out of it opts out everyone who received it.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return []
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT target_email, extra_emails FROM email_history WHERE extra_emails IS NOT NULL")
+    rows = cursor.fetchall()
+    conn.close()
+
+    others: set[str] = set()
+    for target, raw in rows:
+        group = {(target or "").strip().lower()} | {a.strip().lower() for a in _decode_email_list(raw)}
+        if email in group:
+            others |= group
+    others.discard(email)
+    others.discard("")
+    return sorted(others)
+
+
 def get_email_history():
     """
     Send log, newest first, with open data merged in.
@@ -611,6 +661,7 @@ def get_email_history():
     replies_by_thread, replies_by_address = get_reply_summary()
 
     for row in rows:
+        row["extra_emails"] = _decode_email_list(row.get("extra_emails"))
         stats = summary.get(tracking_id_for(row.get("message_id") or ""), {})
         row["open_count"] = stats.get("open_count") or 0
         row["automated_count"] = stats.get("automated_count") or 0
@@ -888,13 +939,14 @@ def get_variant_performance() -> list[dict]:
     results.sort(key=lambda r: (r["enough_data"], r["reply_rate"], r["sent"]), reverse=True)
     return results
 
-def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None, sector: str = "", niche: str = "", include_automation_pitch: bool = False):
+def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None, sector: str = "", niche: str = "", include_automation_pitch: bool = False, extra_emails: list[str] | None = None):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings, sector, niche, include_automation_pitch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None, sector or None, niche or None, 1 if include_automation_pitch else 0)
+        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings, sector, niche, include_automation_pitch, extra_emails) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None, sector or None, niche or None, 1 if include_automation_pitch else 0,
+         json.dumps(extra_emails) if extra_emails else None)
     )
     conn.commit()
     conn.close()
@@ -909,6 +961,7 @@ def get_drafts():
     conn.close()
     drafts = [dict(row) for row in rows]
     for draft in drafts:
+        draft["extra_emails"] = _decode_email_list(draft.get("extra_emails"))
         raw = draft.get("review_warnings")
         try:
             draft["review_warnings"] = json.loads(raw) if raw else []
@@ -935,6 +988,7 @@ def get_draft_by_website(website: str):
     if row is None:
         return None
     draft = dict(row)
+    draft["extra_emails"] = _decode_email_list(draft.get("extra_emails"))
     raw = draft.get("review_warnings")
     try:
         draft["review_warnings"] = json.loads(raw) if raw else []
