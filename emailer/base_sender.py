@@ -18,6 +18,7 @@ from html import escape as html_escape
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
 from email.utils import make_msgid, formatdate, getaddresses
 from urllib.parse import quote
 
@@ -587,6 +588,7 @@ class BaseSender:
         self, to_email: str, subject: str, body: str, message_id: str,
         image_path: str = None, mobile_image_path: str = None,
         closeup_image_path: str = None, extra_to: list[str] | None = None,
+        pdf_path: str = None, pdf_name: str = None,
     ) -> MIMEMultipart:
         """
         Build the first-touch message as multipart/mixed raw MIME carrying
@@ -669,6 +671,13 @@ class BaseSender:
         else:
             alt.attach(MIMEText(themed, "html", "utf-8"))
             msg.attach(alt)
+
+        # The full audit report, as a real file attachment (not inline).
+        if pdf_path and os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as f:
+                pdf = MIMEApplication(f.read(), _subtype="pdf")
+            pdf.add_header("Content-Disposition", "attachment", filename=pdf_name or os.path.basename(pdf_path))
+            msg.attach(pdf)
 
         return msg
 
@@ -780,9 +789,12 @@ class BaseSender:
 
     def send_email(self, to_email: str, subject: str, body: str, image_path: str = None,
                    mobile_image_path: str = None, closeup_image_path: str = None,
-                   extra_to: list[str] | None = None):
+                   extra_to: list[str] | None = None, pdf_path: str = None,
+                   pdf_name: str = None):
         """
         Send the first-touch cold email.
+
+        pdf_path: optional report PDF attached to the message as a file.
 
         Args:
             extra_to:           Other people on the same To line (addresses from
@@ -825,6 +837,7 @@ class BaseSender:
                 image_path=image_path, mobile_image_path=mobile_image_path,
                 closeup_image_path=closeup_image_path,
                 **({"extra_to": extras} if extras else {}),
+                **({"pdf_path": pdf_path, "pdf_name": pdf_name} if pdf_path else {}),
             ),
         )
 
