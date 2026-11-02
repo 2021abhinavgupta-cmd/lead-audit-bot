@@ -141,6 +141,25 @@ function App() {
     }
   };
 
+  const handleDraftSmallPdf = async (draft) => {
+    try {
+      const res = await axios.post(`${API_BASE}/api/draft-pdf`, {
+        subject: draft.subject, body: draft.body, company: draft.company,
+        website: draft.website, target_email: draft.target_email,
+        extra_emails: draft.extra_emails || [], image_url: draft.image_url || '',
+        review_warnings: draft.review_warnings || [], sector: draft.sector || '',
+        niche: draft.niche || '', timestamp: draft.timestamp || '',
+      }, { responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(draft.company || 'draft').replace(/[^A-Za-z0-9]+/g, '-')}-email.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      alert('PDF failed: ' + (err?.message || 'unknown error'));
+    }
+  };
   const [leads, setLeads] = useState(() => {
     const saved = localStorage.getItem('leadAuditLeads');
     return saved ? JSON.parse(saved) : [];
@@ -3049,39 +3068,22 @@ function App() {
                   />
                   <div className="action-buttons" style={{marginTop: '16px'}}>
                     <button className="reject-btn" onClick={() => handleDraftDelete(draft.id)}><X size={18} /> Discard</button>
-                    <button
+                    <select
                       className="reject-btn"
-                      disabled={!draft.website || !!reportBusy[draft.website]}
-                      style={{ cursor: reportBusy[draft.website] ? 'wait' : 'pointer' }}
-                      title="Download the full design review of this website as a PDF. Takes about a minute."
-                      onClick={() => handleReport({ Website: draft.website, Company: draft.company })}
-                    >
-                      {reportBusy[draft.website] ? <Loader2 size={18} className="spin" /> : <FileText size={18} />}
-                      {reportBusy[draft.website] ? ' Making PDF...' : ' Website PDF'}
-                    </button>
-                    <button
-                      className="reject-btn"
-                      title="Download this email (subject and body as edited above) as a PDF."
-                      onClick={async () => {
-                        try {
-                          const res = await axios.post(`${API_BASE}/api/draft-pdf`, {
-                            subject: draft.subject, body: draft.body, company: draft.company,
-                            website: draft.website, target_email: draft.target_email,
-                            extra_emails: draft.extra_emails || [],
-                          }, { responseType: 'blob' });
-                          const url = URL.createObjectURL(res.data);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `${(draft.company || 'draft').replace(/[^A-Za-z0-9]+/g, '-')}-email.pdf`;
-                          document.body.appendChild(a); a.click(); a.remove();
-                          setTimeout(() => URL.revokeObjectURL(url), 60000);
-                        } catch (err) {
-                          alert('Email PDF failed: ' + (err?.message || 'unknown error'));
-                        }
+                      value=""
+                      disabled={!!reportBusy[draft.website]}
+                      title="Small: this email, its screenshot and the key details (a few seconds). Long: the full design audit of the website (about a minute)."
+                      style={{ cursor: 'pointer', padding: '0 12px' }}
+                      onChange={(ev) => {
+                        const choice = ev.target.value;
+                        if (choice === 'small') handleDraftSmallPdf(draft);
+                        if (choice === 'long') handleReport({ Website: draft.website, Company: draft.company });
                       }}
                     >
-                      <FileText size={18} /> Email PDF
-                    </button>
+                      <option value="">{reportBusy[draft.website] ? 'Making PDF...' : 'Download PDF ▾'}</option>
+                      <option value="small">Small PDF: email + screenshot + details</option>
+                      <option value="long" disabled={!draft.website}>Long PDF: full website audit</option>
+                    </select>
                     <button className="send-btn" onClick={() => handleDraftSend(draft, i)}><Send size={18} /> Approve & Send</button>
                   </div>
                 </div>

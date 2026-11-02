@@ -2696,6 +2696,26 @@ class DraftPdfRequest(BaseModel):
     website: str = ""
     target_email: str = ""
     extra_emails: list[str] = []
+    image_url: str = ""
+    review_warnings: list[str] = []
+    sector: str = ""
+    niche: str = ""
+    timestamp: str = ""
+
+
+def _draft_pdf_screenshot_data_uri(image_url: str) -> str:
+    """Inline the draft's screenshot. Only a file directly inside the
+    screenshots folder is ever read, whatever the client sent."""
+    import base64
+    name = os.path.basename((image_url or "").split("?")[0])
+    path = os.path.join(SCREENSHOTS_DIR, name)
+    if not name or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as f:
+            return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+    except OSError:
+        return ""
 
 
 @app.post("/api/draft-pdf")
@@ -2709,18 +2729,43 @@ async def draft_pdf(
         raise HTTPException(status_code=400, detail="This draft is empty.")
     e = lambda s: _html.escape(s or "")
     to = ", ".join(a for a in [req.target_email, *req.extra_emails] if a)
+    category = " / ".join(x for x in (req.sector, req.niche) if x)
     rows = "".join(
         f'<tr><td class="k">{k}</td><td>{e(v)}</td></tr>'
-        for k, v in (("Subject", req.subject), ("To", to), ("Company", req.company), ("Website", req.website))
+        for k, v in (
+            ("Company", req.company), ("Website", req.website), ("Sent to", to),
+            ("Category", category), ("Draft created", req.timestamp),
+        )
         if v
     )
+    shot = _draft_pdf_screenshot_data_uri(req.image_url)
+    shot_html = (
+        '<h2>What the audit saw</h2>'
+        '<p class="cap">The screenshot attached to this email. The magenta box marks the problem it points at.</p>'
+        f'<img src="{shot}">'
+    ) if shot else ""
+    warn_html = (
+        '<h2>Review notes</h2><ul class="warn">' + "".join(f"<li>{e(w)}</li>" for w in req.review_warnings) + "</ul>"
+    ) if req.review_warnings else ""
     page = (
         '<!doctype html><meta charset="utf-8"><style>'
-        '@page{size:A4;margin:0}body{font-family:Arial,Helvetica,sans-serif;color:#1e293b;margin:0;padding:48px 56px}'
-        'table{border-collapse:collapse;margin-bottom:24px;width:100%}td{padding:6px 0;vertical-align:top;font-size:13px}'
-        '.k{color:#64748b;width:90px}hr{border:0;border-top:1px solid #e2e8f0;margin:0 0 24px}'
-        '.body{white-space:pre-wrap;font-size:14px;line-height:1.65}</style>'
-        f'<table>{rows}</table><hr><div class="body">{e(req.body)}</div>'
+        '@page{size:A4;margin:0}*{box-sizing:border-box}'
+        'body{font-family:Arial,Helvetica,sans-serif;color:#1e293b;margin:0}'
+        '.top{background:#0f172a;color:#fff;padding:30px 48px}.top small{color:#94a3b8;letter-spacing:.08em;font-size:11px}'
+        '.top h1{margin:6px 0 0;font-size:22px;line-height:1.3}'
+        '.in{padding:28px 48px}h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#64748b;margin:26px 0 8px}'
+        'table{border-collapse:collapse;width:100%}td{padding:5px 0;vertical-align:top;font-size:13px;border-bottom:1px solid #f1f5f9}'
+        '.k{color:#64748b;width:110px}img{width:100%;border:1px solid #e2e8f0;border-radius:8px}'
+        '.cap{font-size:12px;color:#64748b;margin:0 0 8px}'
+        '.mail{border:1px solid #e2e8f0;border-radius:8px;padding:20px 24px;background:#f8fafc}'
+        '.subj{font-weight:700;font-size:15px;margin-bottom:14px}'
+        '.body{white-space:pre-wrap;font-size:14px;line-height:1.65}'
+        '.warn{font-size:12.5px;color:#b45309;padding-left:18px}.shot{page-break-inside:avoid}</style>'
+        f'<div class="top"><small>EMAIL DRAFT</small><h1>{e(req.subject)}</h1></div><div class="in">'
+        f'<h2>Details</h2><table>{rows}</table>'
+        f'<div class="shot">{shot_html}</div>'
+        f'<h2>The email</h2><div class="mail"><div class="subj">{e(req.subject)}</div>'
+        f'<div class="body">{e(req.body)}</div></div>{warn_html}</div>'
     )
     try:
         pdf = await reporting_report.render_pdf(page)
