@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+﻿from fastapi.testclient import TestClient
 
 import app as app_module
 
@@ -18,7 +18,7 @@ def test_empty_draft_is_rejected():
 def test_draft_renders_to_a_real_pdf_with_escaped_text(monkeypatch):
     seen = {}
 
-    async def fake_render(html):
+    async def fake_render(html, margin_mm=0):
         seen["html"] = html
         return b"%PDF-1.4 fake"
 
@@ -44,7 +44,7 @@ def test_small_pdf_inlines_the_screenshot_and_ignores_path_tricks(monkeypatch, t
     monkeypatch.setattr(app_module, "SCREENSHOTS_DIR", str(shots))
     seen = {}
 
-    async def fake_render(html):
+    async def fake_render(html, margin_mm=0):
         seen["html"] = html
         return b"%PDF-1.4 fake"
 
@@ -85,3 +85,4 @@ def test_send_refuses_an_unknown_report_job(monkeypatch):
     r = _client().post("/api/send", json={"email": "a@b.com", "subject": "S", "body": "B", "company": "C",
                                           "website": "https://c.com", "report_job_id": "nope"}, headers=_H)
     assert r.status_code == 409 and "PDF" in r.json()["detail"]
+
