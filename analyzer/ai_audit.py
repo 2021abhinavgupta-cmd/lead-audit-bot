@@ -226,6 +226,19 @@ class AIAuditor:
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _subject_with_site(subject: str, url: str) -> str:
+        """Put the lead's own site address in the subject ("acme.com: 7 Broken
+        Links ..."). Seeing their own domain makes the email read as written
+        about them, not mass-sent. Done in code, not by prompt, so every draft
+        gets it; unchanged when the host is unknown or already present."""
+        subject = (subject or "").strip()
+        host = re.sub(r"^https?://", "", (url or "").strip().lower()).split("/")[0].split("?")[0]
+        host = host[4:] if host.startswith("www.") else host
+        if not subject or "." not in host or host in subject.lower():
+            return subject
+        return f"{host}: {subject}"
+
     def analyze_lead(
         self,
         company: str,
@@ -274,6 +287,9 @@ class AIAuditor:
             parsed = self._parse_json(raw)
             if parsed is not None:
                 parsed["ai_cost"] = cost
+                parsed["email_subject"] = self._subject_with_site(
+                    parsed.get("email_subject", ""), getattr(web, "url", "")
+                )
 
                 # Self-consistency is effectively a seventh review check, and
                 # its total-disagreement case is the STRONGEST fabrication
