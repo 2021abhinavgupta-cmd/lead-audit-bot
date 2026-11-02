@@ -1736,10 +1736,37 @@ async def get_costs(_auth: None = Depends(require_api_key), _rl: None = Depends(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+_ses_stats_cache: dict = {"at": 0.0, "value": None}
+
+
+def _ses_delivery_stats() -> dict | None:
+    """
+    Bounces and spam complaints SES itself counted over its last ~14 days
+    (account wide, so it includes warm-up and test sends). Cached 5 minutes.
+    None when this is not the SES transport or AWS cannot be reached; the
+    caller must show that as 'unknown', never as zero.
+    """
+    now = time.time()
+    if now - _ses_stats_cache["at"] < 300:
+        return _ses_stats_cache["value"]
+    value = None
+    client = getattr(ses, "client", None)
+    if client is not None and hasattr(client, "get_send_statistics"):
+        try:
+            points = client.get_send_statistics().get("SendDataPoints", [])
+            value = {k.lower(): sum(p.get(k, 0) for p in points)
+                     for k in ("DeliveryAttempts", "Bounces", "Complaints", "Rejects")}
+        except Exception as e:
+            print(f"[History] SES statistics unavailable: {e}")
+    _ses_stats_cache.update(at=now, value=value)
+    return value
+
+
 @app.get("/api/history")
 async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
         history = await asyncio.to_thread(db.get_email_history)
+        ses_stats = await asyncio.to_thread(_ses_delivery_stats)
         # The frontend needs this to tell "nobody opened it" apart from
         # "opens were never measured" — both look like open_count 0.
         variant_performance = await asyncio.to_thread(db.get_variant_performance)
@@ -1752,6 +1779,7 @@ async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depend
             # enough_data: false and must not be read as a result yet.
             "variant_performance": variant_performance,
             "current_variant": config.EMAIL_VARIANT,
+            "ses_stats": ses_stats,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
