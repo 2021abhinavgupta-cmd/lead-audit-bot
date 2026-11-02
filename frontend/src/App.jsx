@@ -241,6 +241,7 @@ function App() {
   const [historyLogs, setHistoryLogs] = useState([]);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [replyCheckEnabled, setReplyCheckEnabled] = useState(false);
+  const [sesStats, setSesStats] = useState(null);
   const [checkingReplies, setCheckingReplies] = useState(false);
   const [variantPerf, setVariantPerf] = useState([]);
   const [currentVariant, setCurrentVariant] = useState('');
@@ -355,6 +356,7 @@ function App() {
         setReplyCheckEnabled(!!res.data.reply_checking_enabled);
         setVariantPerf(res.data.variant_performance || []);
         setCurrentVariant(res.data.current_variant || '');
+        setSesStats(res.data.ses_stats || null);
       }).catch(console.error);
     }
     if (currentView === 'cost') {
@@ -3203,6 +3205,45 @@ function App() {
         </div>
       </div>
       <p style={{color: '#94a3b8', marginBottom: '16px', marginTop: '8px'}}>Persistent log of all outbound emails dispatched.</p>
+
+      {(() => {
+        // One glance: counts follow the filters below. "First emails" are the
+        // original cold sends; follow-ups are counted on their own so they
+        // never inflate the opened / replied percentages.
+        const isFollowUp = (l) => l.followup_of != null || String(l.variant || '').startsWith('followup');
+        const firsts = filteredHistoryLogs.filter(l => !isFollowUp(l));
+        const followUps = filteredHistoryLogs.filter(isFollowUp);
+        const opened = firsts.filter(l => l.open_count > 0).length;
+        const replied = filteredHistoryLogs.filter(l => l.replied).length;
+        const bounced = filteredHistoryLogs.filter(l => l.bounced).length;
+        const pct = (n) => (firsts.length ? `${Math.round((100 * n) / firsts.length)}% of first emails` : '');
+        const cards = [
+          { label: 'Emails sent', value: filteredHistoryLogs.length, note: `${firsts.length} first emails + ${followUps.length} follow-ups`, color: '#3b82f6' },
+          { label: 'Opened', value: trackingEnabled ? opened : '—', note: trackingEnabled ? `${pct(opened)} (approximate)` : 'Open tracking is off', color: '#8b5cf6' },
+          { label: 'Replied', value: replyCheckEnabled ? replied : '—', note: replyCheckEnabled ? pct(replied) : 'Reply detection is off (needs IMAP)', color: '#10b981' },
+          { label: 'Follow-ups sent', value: followUps.length, note: `${firsts.filter(l => followedUpIds.has(l.id)).length} leads followed up`, color: '#f59e0b' },
+          { label: 'Bounced', value: replyCheckEnabled ? bounced : '—', note: replyCheckEnabled ? 'Address did not exist or refused mail' : 'Needs reply detection (IMAP)', color: '#ef4444' },
+          {
+            label: 'Marked as spam',
+            value: sesStats ? sesStats.complaints : '—',
+            note: sesStats
+              ? `Complaints reported to SES in the last 14 days, account wide. ${sesStats.bounces} bounces. Gmail and Outlook do not tell senders about the spam folder, so mails that quietly landed there cannot be counted.`
+              : 'Not measurable. Gmail and Outlook do not tell senders when a mail lands in the spam folder.',
+            color: '#64748b',
+          },
+        ];
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+            {cards.map(c => (
+              <div key={c.label} style={{ padding: '14px 16px', borderRadius: '10px', background: 'rgba(148,163,184,0.1)', border: '1px solid rgba(148,163,184,0.25)', borderTop: `4px solid ${c.color}` }}>
+                <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{c.label}</div>
+                <div style={{ fontSize: '34px', fontWeight: 800, lineHeight: 1.15, color: c.color }}>{c.value}</div>
+                <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>{c.note}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '16px', padding: '12px 16px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
