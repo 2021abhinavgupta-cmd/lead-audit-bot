@@ -81,6 +81,82 @@ _NOT_FOUND_MARKERS = ("sorry, this page isn't available", "page not found")
 
 
 # ---------------------------------------------------------------------------
+# politeness
+# ---------------------------------------------------------------------------
+
+class InstagramThrottle:
+    """Module-level politeness for every Instagram profile load.
+
+    * at least min_interval seconds between loads (waits it out, it is short)
+    * at most max_per_hour loads per rolling hour (refuses with a note; it
+      never sleeps for an hour inside a request)
+    * a cooldown after a 429 / challenge / login wall, like the legacy
+      scrapers/instagram.py breaker: retrying right after Instagram pushed
+      back is how a soft flag becomes a block
+    * a separate window during which the spare session is known dead, so a
+      checkpointed account is not hit again on every read
+    """
+
+    def __init__(self, min_interval=20, max_per_hour=20, cooldown=3600, clock=None, sleep=None):
+        self.min_interval = min_interval
+        self.max_per_hour = max_per_hour
+        self.cooldown = cooldown
+        self._clock = clock or time.time
+        self._sleep = sleep or time.sleep
+        self._loads: deque = deque()
+        self._last = None
+        self._locked_until = 0.0
+        self._session_dead_until = 0.0
+
+    def _prune(self, now):
+        while self._loads and now - self._loads[0] >= 3600:
+            self._loads.popleft()
+
+    def blocked_note(self) -> str | None:
+        """Why a load may not happen right now, without consuming a slot."""
+        now = self._clock()
+        if now < self._locked_until:
+            mins = max(1, int((self._locked_until - now + 59) // 60))
+            return (f"Instagram asked us to slow down, so Instagram reads are paused for about "
+                    f"{mins} more minutes (60 minute cooldown). Try again later.")
+        self._prune(now)
+        if len(self._loads) >= self.max_per_hour:
+            mins = max(1, int((self._loads[0] + 3600 - now + 59) // 60))
+            return (f"Read limit reached ({self.max_per_hour} Instagram profiles per hour, to stay polite "
+                    f"to Instagram). Try again in about {mins} minutes.")
+        return None
+
+    def acquire(self) -> str | None:
+        """Take one load slot (waiting out the minimum interval). Returns
+        None when the load may go ahead, else the note to show instead."""
+        note = self.blocked_note()
+        if note:
+            return note
+        if self._last is not None:
+            wait = self._last + self.min_interval - self._clock()
+            if wait > 0:
+                self._sleep(wait)
+        now = self._clock()
+        self._last = now
+        self._loads.append(now)
+        return None
+
+    def trip(self) -> None:
+        self._locked_until = self._clock() + self.cooldown
+        print(f"[InstagramWeb] Instagram pushed back (429 / challenge / login wall), "
+              f"pausing all Instagram reads for {self.cooldown // 60} minutes")
+
+    def session_usable(self) -> bool:
+        return self._clock() >= self._session_dead_until
+
+    def mark_session_dead(self) -> None:
+        self._session_dead_until = self._clock() + self.cooldown
+
+
+_THROTTLE = InstagramThrottle()
+
+
+# ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
 
