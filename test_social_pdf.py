@@ -167,16 +167,23 @@ def test_long_action_plan_runs_high_to_low(seen):
     assert order == sorted(order)
 
 
-def test_long_never_carries_internal_material(seen):
-    _post(body("long"))
-    html = seen["html"]
-    text = _visible(html)
-    low = text.lower()
-    for absent in ("lead score", "audience quality", "internal", "Posted within the last month",
-                   INTERNAL_SIGNAL, "Your bio link is broken", "The link in your bio fails",
-                   "Limited view", "Cakes in Pune", "strong"):
+# Internal material from body(): none of it may reach a client facing PDF.
+LONG_FORBIDDEN = ("lead score", "audience quality", "internal", "Posted within the last month",
+                  INTERNAL_SIGNAL, "Your bio link is broken", "The link in your bio fails",
+                  "Limited view", "Cakes in Pune", "strong")
+
+
+def assert_no_internal_material(html):
+    """Shared with test_combined_pdf.py for the Instagram half of the combined PDF."""
+    low = _visible(html).lower()
+    for absent in LONG_FORBIDDEN:
         assert absent.lower() not in low, absent
     assert not re.search(r"\b(fake|fakes|bot|bots|bought|pod|pods)\b", html, re.I)
+
+
+def test_long_never_carries_internal_material(seen):
+    _post(body("long"))
+    assert_no_internal_material(seen["html"])
 
 
 def test_long_engagement_only_when_known_and_never_a_benchmark(seen):

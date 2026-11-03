@@ -57,6 +57,7 @@ from importer import presend_gate
 from reporting import collect as reporting_collect
 from reporting import report as reporting_report
 from reporting import social_pdf as reporting_social_pdf
+from reporting import combine as reporting_combine
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -2705,7 +2706,8 @@ async def create_report(
     for old in [k for k, v in _report_jobs.items() if now - v["created"] > _REPORT_JOB_TTL]:
         _report_jobs.pop(old, None)
     job_id = uuid.uuid4().hex
-    _report_jobs[job_id] = {"status": "running", "created": now}
+    # website is recorded so /api/combined-pdf can check a job belongs to the site it is merged for
+    _report_jobs[job_id] = {"status": "running", "created": now, "website": website}
     task = asyncio.create_task(_run_report_job(job_id, website, req.company))
     _report_tasks.add(task)
     task.add_done_callback(_report_tasks.discard)
@@ -2910,6 +2912,88 @@ async def social_pdf(
     name = re.sub(r"[^A-Za-z0-9]+", "-", req.company or req.handle or "social").strip("-") or "social"
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="{name}-social-{req.mode}.pdf"'})
+
+
+class CombinedPdfRequest(SocialPdfRequest):
+    # Always the long, client facing Instagram audit: the small one is internal.
+    mode: Literal["long"] = "long"
+    platform: Literal["instagram"] = "instagram"
+    # A finished /api/report job for the same website (the Social tab starts it
+    # through the usual job flow and polls it, so no request waits a minute).
+    report_job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+COMBINED_PDF_RATE_LIMIT = rate_limit(10, 60)
+
+
+def _report_site_key(url: str) -> str:
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = "https://" + url
+    return url.rstrip("/").lower()
+
+
+@app.post("/api/combined-pdf")
+async def combined_pdf(
+    req: CombinedPdfRequest,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(COMBINED_PDF_RATE_LIMIT),
+):
+    """One client facing PDF: the website design audit (a finished /api/report
+    job) followed by the long Instagram audit. Either half failing returns an
+    error and no file, never a partial merge."""
+    data = req.model_dump(exclude={"report_job_id"})
+    if not reporting_social_pdf.has_content(data):
+        raise HTTPException(status_code=400, detail="Nothing to put in the Instagram part of this PDF.")
+    website = (req.website or "").strip()
+    if not website:
+        raise HTTPException(status_code=400, detail="The combined PDF needs the business's website.")
+    if "://" not in website:
+        website = "https://" + website
+    try:
+        await asyncio.to_thread(validate_public_url, website)
+    except UnsafeURLError as e:
+        raise HTTPException(status_code=400, detail=f"Refusing to build a report for this URL: {e}")
+
+    job = _report_jobs.get(req.report_job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="No such website report (it may have expired). Make it again.")
+    if job.get("status") == "failed":
+        raise HTTPException(status_code=502, detail=f"The website report failed: {job.get('error') or 'unknown error'}. No PDF was made.")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="The website report is not finished yet.")
+    if _report_site_key(job.get("website", "")) != _report_site_key(website):
+        raise HTTPException(status_code=409, detail="That website report is for a different website.")
+    # only a file the job store wrote, directly inside the reports folder
+    path = os.path.realpath(job.get("path") or "")
+    if os.path.dirname(path) != os.path.realpath(REPORTS_DIR) or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="The website report file is gone. Make it again.")
+    with open(path, "rb") as fh:
+        website_pdf = fh.read()
+
+    page = reporting_social_pdf.build_long_html(
+        data,
+        sender_name=os.getenv("YOUR_NAME", "Kshitij Gupta"),
+        sender_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
+    )
+    try:
+        social = await reporting_report.render_pdf(page, margin_mm=14)
+    except Exception as ex:
+        print(f"[CombinedPdf] Instagram part failed: {ex}")
+        raise HTTPException(status_code=500, detail="The Instagram part of the PDF could not be created.")
+
+    company = (req.company or "").strip() or (req.handle or "").strip() or "Business"
+    try:
+        merged = await asyncio.to_thread(
+            reporting_combine.merge_pdfs, [website_pdf, social],
+            title=f"{company} website and Instagram audit",
+        )
+    except reporting_combine.CombineError as ex:
+        print(f"[CombinedPdf] merge failed: {ex}")
+        raise HTTPException(status_code=502, detail="The two reports could not be combined. No PDF was made.")
+    name = re.sub(r"[^A-Za-z0-9]+", "-", company).strip("-") or "Business"
+    return Response(content=merged, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-website-and-instagram-audit.pdf"'})
 
 
 # Mount screenshots folder
