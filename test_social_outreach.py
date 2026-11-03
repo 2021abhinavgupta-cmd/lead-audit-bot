@@ -98,7 +98,9 @@ def test_email_prompt_carries_measured_engagement_numbers():
     facts, nums = measured_facts(p)
     joined = " ".join(facts)
     assert "5,200 followers" in joined and "last 5 posts" in joined
-    assert "45 likes" in joined and "2 comments" in joined and "0.9 percent" in joined
+    # median of 40, 50, 30, 60, 44 likes (the mean would say 45)
+    assert "about 44 likes" in joined and "2 comments" in joined and "0.9 percent" in joined
+    assert "typical post" in joined and "averages" not in joined
     prompt = _build_outreach_prompt("Acme", p, [], "email", "Kshitij")
     assert "MEASURED FACTS" in prompt and "5,200 followers" in prompt
 
@@ -128,7 +130,7 @@ def test_email_retry_that_fixes_the_numbers_is_accepted():
     p = _engaged_profile()
     replies = iter([
         json.dumps({"subject": "S", "body": "You lose 73 customers a week."}),
-        json.dumps({"subject": "Fix it", "body": "5,200 followers but about 45 likes per post."}),
+        json.dumps({"subject": "Fix it", "body": "5,200 followers but about 44 likes per post."}),
     ])
     out = generate_social_outreach("Acme", p, [], "email", ai_call=lambda _p: (next(replies), 0.001))
     assert out["body"].startswith("5,200 followers") and out["subject"] == "Fix it"

@@ -9,6 +9,7 @@ rather than raising.
 """
 
 from dataclasses import dataclass, field
+from statistics import median
 
 
 @dataclass
@@ -56,7 +57,9 @@ class SocialProfile:
     # logged-in session reader), or for at least 4 recent posts through their
     # public embed pages (a public Instagram read; the other posts keep
     # likes/comments None). avg_engagement_rate then covers the posts read
-    # only. Per-post checks must still skip posts whose counts are None.
+    # only, and despite its name is the TYPICAL post (median likes plus
+    # median comments, see median_engagement_rate), not the mean.
+    # Per-post checks must still skip posts whose counts are None.
     engagement_known: bool = False
     # Story highlights shown on the profile, None when not read.
     highlights_count: int | None = None
@@ -77,6 +80,16 @@ def classify_frequency(posts_last_30_days: int) -> str:
     if posts_last_30_days >= 1:
         return "irregular"
     return "inactive (no posts in 30 days)"
+
+
+def median_engagement_rate(likes: list, comments: list, followers: int) -> float:
+    """(median likes + median comments) per post as a percent of followers,
+    rounded to 2 places. The median, not the mean: one viral or collab post
+    with thousands of likes would otherwise make a small account look hugely
+    engaged. 0.0 without posts or followers."""
+    if not likes or not comments or not followers or followers <= 0:
+        return 0.0
+    return round((median(likes) + median(comments)) / followers * 100, 2)
 
 
 def unanalyzed(platform: str, handle: str, url: str, note: str) -> SocialProfile:

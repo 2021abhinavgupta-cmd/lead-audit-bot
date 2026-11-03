@@ -64,7 +64,7 @@ from datetime import date, datetime, timedelta, timezone
 from html import unescape
 
 import config
-from scrapers.social.base import SocialProfile, classify_frequency, unanalyzed
+from scrapers.social.base import SocialProfile, classify_frequency, median_engagement_rate, unanalyzed
 
 IG_APP_ID = "936619743392459"
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -551,13 +551,14 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
         p.highlights_count = hl
 
     cutoff = now - timedelta(days=30)
-    total_likes = total_comments = 0
+    like_counts = []
+    comment_counts = []
     taken = []
     captions = []
     posts = []
     for n in nodes:
-        total_likes += _count(n, "edge_liked_by") or _count(n, "edge_media_preview_like")
-        total_comments += _count(n, "edge_media_to_comment")
+        like_counts.append(_count(n, "edge_liked_by") or _count(n, "edge_media_preview_like"))
+        comment_counts.append(_count(n, "edge_media_to_comment"))
         ts = n.get("taken_at_timestamp")
         post_ts = None
         if isinstance(ts, (int, float)) and ts > 0:
@@ -591,9 +592,9 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
                           and all(x["likes"] is not None and x["comments"] is not None for x in posts))
     if nodes and followers > 0:
         # likes and comments do not depend on the dates, so this holds even
-        # when the dates below are incomplete
-        count = len(nodes)
-        p.avg_engagement_rate = round((total_likes / count + total_comments / count) / followers * 100, 2)
+        # when the dates below are incomplete. Median per post, so one
+        # viral or collab post cannot inflate a small account's rate.
+        p.avg_engagement_rate = median_engagement_rate(like_counts, comment_counts, followers)
     if (nodes and len(taken) != len(nodes)) or (not nodes and p.posts_count > 0):
         # posts exist but their dates were not all returned: do not guess
         p.activity_known = False
@@ -932,10 +933,9 @@ def _fill_from_embeds(p: SocialProfile, handle: str, fetch, th) -> None:
             read.append(post)
     if len(read) >= EMBED_MIN_POSTS and p.followers > 0:
         n = len(read)
-        likes = sum(x["likes"] for x in read)
-        comments = sum(x["comments"] for x in read)
         p.engagement_known = True
-        p.avg_engagement_rate = round((likes / n + comments / n) / p.followers * 100, 2)
+        p.avg_engagement_rate = median_engagement_rate(
+            [x["likes"] for x in read], [x["comments"] for x in read], p.followers)
         p.note = _engagement_note(p.note, n)
     elif targets and (stopped or not read):
         p.note = _join(p.note, NOTE_EMBED_FAILED)

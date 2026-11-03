@@ -14,6 +14,7 @@ shown, and the rest of this codebase's generated copy forbids dashes).
 import json
 import re as _re
 from dataclasses import dataclass
+from statistics import median
 
 from analyzer import social_link
 from scrapers.social.base import SocialProfile
@@ -541,22 +542,40 @@ def _fmt_num(n: float) -> str:
     return f"{n:.1f}".removesuffix(".0")
 
 
+def engagement_summary(profile) -> dict | None:
+    """The typical recent post: {"median_likes", "median_comments",
+    "posts_read"} over the posts whose likes AND comments were read. The
+    median, not the mean, so one viral or collab post cannot inflate it.
+    None unless engagement is known and at least four posts were counted."""
+    if profile is None or not getattr(profile, "engagement_known", False):
+        return None
+    read = [p for p in (getattr(profile, "recent_posts", None) or [])
+            if isinstance(p, dict) and p.get("likes") is not None and p.get("comments") is not None]
+    if len(read) < 4:
+        return None
+    return {
+        "median_likes": median(p["likes"] for p in read),
+        "median_comments": median(p["comments"] for p in read),
+        "posts_read": len(read),
+    }
+
+
 def measured_facts(profile) -> tuple[list[str], set[str]]:
     """Real numbers read from the account, as plain sentences the email may
     quote, plus the set of digit strings those sentences contain. Engagement
-    facts only when at least four recent posts were actually counted."""
+    facts only when at least four recent posts were actually counted, and
+    they describe the TYPICAL post (median), never an average."""
     facts: list[str] = []
     if profile.followers and profile.followers > 0:
         facts.append(f"The account has {profile.followers:,} followers")
-    read = [p for p in (profile.recent_posts or [])
-            if isinstance(p, dict) and p.get("likes") is not None and p.get("comments") is not None]
-    if getattr(profile, "engagement_known", False) and len(read) >= 4:
-        likes = sum(p["likes"] for p in read) / len(read)
-        comments = sum(p["comments"] for p in read) / len(read)
-        facts.append(f"Across its last {len(read)} posts it averages {_fmt_num(likes)} likes and "
-                     f"{_fmt_num(comments)} comments per post")
+    summary = engagement_summary(profile)
+    if summary:
+        facts.append(f"Across its last {summary['posts_read']} posts, a typical post gets about "
+                     f"{_fmt_num(summary['median_likes'])} likes and "
+                     f"{_fmt_num(summary['median_comments'])} comments")
         if profile.avg_engagement_rate and profile.avg_engagement_rate > 0:
-            facts.append(f"That is an engagement rate of about {profile.avg_engagement_rate:.1f} percent of its followers per post")
+            facts.append(f"For a typical post that is an engagement rate of about "
+                         f"{profile.avg_engagement_rate:.1f} percent of its followers")
     nums = {m.replace(",", "") for f in facts for m in _re.findall(r"\d[\d,]*\.?\d*", f)}
     return facts, nums
 
