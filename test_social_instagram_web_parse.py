@@ -349,3 +349,43 @@ def test_classify_session_response():
     assert c(403, None) == "session_dead"
     assert c(500, None) == "error"
     assert c(200, "not json") == "error"
+
+
+# ---------------------------------------------------------------------------
+# scripts/ig_login.py helper
+# ---------------------------------------------------------------------------
+
+def test_wait_for_session_cookie_returns_once_logged_in():
+    t = [0.0]
+    states = iter([[], [{"name": "csrftoken", "value": "x"}], [{"name": "sessionid", "value": "s"}]])
+    ok = igw.wait_for_session_cookie(lambda: next(states), timeout=60, poll=2,
+                                     clock=lambda: t[0], sleep=lambda s: t.__setitem__(0, t[0] + s))
+    assert ok is True
+    assert t[0] == 4
+
+
+def test_wait_for_session_cookie_times_out():
+    t = [0.0]
+    ok = igw.wait_for_session_cookie(lambda: [], timeout=10, poll=2,
+                                     clock=lambda: t[0], sleep=lambda s: t.__setitem__(0, t[0] + s))
+    assert ok is False
+
+
+def test_config_has_ig_session_dir_default():
+    import config as cfg
+    assert hasattr(cfg, "IG_SESSION_DIR")
+    src = open(cfg.__file__, encoding="utf-8").read()
+    assert 'os.getenv("IG_SESSION_DIR", os.path.join("data", "ig_session"))' in src
+
+
+def test_instagram_cookies_from_storage_state_keeps_only_instagram():
+    state = {"cookies": [
+        {"name": "sessionid", "value": "s", "domain": ".instagram.com", "path": "/"},
+        {"name": "csrftoken", "value": "c", "domain": ".instagram.com", "path": "/"},
+        {"name": "other", "value": "x", "domain": ".facebook.com", "path": "/"},
+        "garbage",
+    ], "origins": []}
+    names = [c["name"] for c in igw.instagram_cookies_from_state(state)]
+    assert names == ["sessionid", "csrftoken"]
+    assert igw.instagram_cookies_from_state(None) == []
+    assert igw.instagram_cookies_from_state({"cookies": "nope"}) == []

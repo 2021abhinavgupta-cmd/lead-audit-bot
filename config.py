@@ -112,6 +112,12 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 # === Instagram Credentials ===
 IG_USERNAME = os.getenv("IG_USERNAME")
 IG_PASSWORD = os.getenv("IG_PASSWORD")
+# Persistent Playwright profile of the spare Instagram account used by the
+# Social tab's session reader (scrapers/social/instagram_web.py). Log in once
+# by hand with `python scripts/ig_login.py`. Relative paths resolve from the
+# project root; data/ is gitignored, so the cookies never reach git. Absent or
+# empty -> the reader uses the public logged-out page only.
+IG_SESSION_DIR = os.getenv("IG_SESSION_DIR", os.path.join("data", "ig_session"))
 
 # Reputation warm-up sending (warmup_send.py) — off by default so a deploy
 # never starts sending warm-up mail on its own. When enabled and scheduler.py

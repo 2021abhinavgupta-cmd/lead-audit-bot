@@ -203,6 +203,31 @@ def has_session_cookie(cookies) -> bool:
     return any(c.get("name") == "sessionid" and c.get("value") for c in (cookies or []))
 
 
+STATE_FILE = "storage_state.json"
+
+
+def instagram_cookies_from_state(state) -> list:
+    """The instagram.com cookies out of a Playwright storage_state dict."""
+    cookies = (state or {}).get("cookies") if isinstance(state, dict) else None
+    if not isinstance(cookies, list):
+        return []
+    return [c for c in cookies if isinstance(c, dict) and "instagram.com" in str(c.get("domain", ""))]
+
+
+def wait_for_session_cookie(get_cookies, *, timeout=600, poll=2, clock=None, sleep=None) -> bool:
+    """Poll get_cookies() until a sessionid cookie appears (the hand login,
+    including any checkpoint, is finished) or timeout seconds pass."""
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    deadline = clock() + timeout
+    while True:
+        if has_session_cookie(get_cookies()):
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(poll)
+
+
 def profile_url(handle: str) -> str:
     return f"https://www.instagram.com/{handle}/"
 
@@ -509,6 +534,19 @@ def _playwright_public_fetch(handle: str) -> PublicPage:
             browser.close()
 
 
+def _load_state_cookies(ctx, user_data_dir: str) -> None:
+    path = os.path.join(user_data_dir, STATE_FILE)
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            cookies = instagram_cookies_from_state(json.load(f))
+        if cookies:
+            ctx.add_cookies(cookies)
+    except Exception as e:  # noqa: BLE001  (a bad state file just means "no session")
+        print(f"[InstagramWeb] could not load {STATE_FILE}: {e}")
+
+
 def _make_session_fetch(user_data_dir: str):
     def _playwright_session_fetch(handle: str, gate) -> SessionResult:
         """web_profile_info through the persistent logged-in context (same
@@ -520,6 +558,13 @@ def _make_session_fetch(user_data_dir: str):
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir, headless=True, args=_LAUNCH_ARGS, **browser_identity(p))
             try:
+                if not has_session_cookie(ctx.cookies("https://www.instagram.com")):
+                    # The profile's own cookie store is encrypted per OS: a
+                    # login made by scripts/ig_login.py on the Windows host is
+                    # unreadable to Linux Chromium in the Docker container.
+                    # The login script also saves a plain storage_state.json
+                    # in the same (gitignored) folder; load its cookies.
+                    _load_state_cookies(ctx, user_data_dir)
                 if not has_session_cookie(ctx.cookies("https://www.instagram.com")):
                     return SessionResult("no_session")
                 note = gate()
