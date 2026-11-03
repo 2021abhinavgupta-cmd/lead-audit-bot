@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { createPdfReport, reportErrorMessage } from './pdfReport';
+import { createPdfReport, reportErrorMessage, blobErrorMessage } from './pdfReport';
 import ImportView from './ImportView.jsx';
 import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot, FileSpreadsheet } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -2824,15 +2824,11 @@ function App() {
     return { median_likes: med(read.map(x => x.likes)), median_comments: med(read.map(x => x.comments)), posts_read: read.length };
   };
 
-  const handleSocialPdf = async (biz, index, platform, mode) => {
-    const key = `${index}-${platform}`;
-    const data = (biz.audit || {})[platform];
-    if (!data || socialPdfBusy[key]) return;
+  const socialPdfPayload = (biz, platform, mode) => {
+    const data = (biz.audit || {})[platform] || {};
     const p = data.profile || {};
     const typical = socialTypicalPost(data);
-    setSocialPdfBusy(b => ({ ...b, [key]: true }));
-    try {
-      const res = await axios.post(`${API_BASE}/api/social-pdf`, {
+    return {
         mode, company: biz.company || '', platform, handle: p.handle || '',
         profile_url: p.url || '', website: biz.website || '',
         profile: {
@@ -2852,15 +2848,53 @@ function App() {
               signals: (data.audience_quality.signals || []).map(s => ({ detail: s.detail || '' })) }
           : null,
         timestamp: new Date(biz.auditedAt || Date.now()).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
-      }, { responseType: 'blob' });
-      const url = URL.createObjectURL(res.data);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${(biz.company || p.handle || 'social').replace(/[^A-Za-z0-9]+/g, '-')}-social-${mode}.pdf`;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    };
+  };
+
+  const saveBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+
+  const handleSocialPdf = async (biz, index, platform, mode) => {
+    const key = `${index}-${platform}`;
+    const data = (biz.audit || {})[platform];
+    if (!data || socialPdfBusy[key]) return;
+    const p = data.profile || {};
+    setSocialPdfBusy(b => ({ ...b, [key]: true }));
+    try {
+      const res = await axios.post(`${API_BASE}/api/social-pdf`, socialPdfPayload(biz, platform, mode), { responseType: 'blob' });
+      saveBlob(res.data, `${(biz.company || p.handle || 'social').replace(/[^A-Za-z0-9]+/g, '-')}-social-${mode}.pdf`);
     } catch (err) {
       alert('PDF failed: ' + (err?.message || 'unknown error'));
+    } finally {
+      setSocialPdfBusy(b => ({ ...b, [key]: false }));
+    }
+  };
+
+  // One client facing file: the website design audit (the usual /api/report
+  // job, about a minute, polled so the page stays usable) followed by the long
+  // Instagram audit. Any failure alerts and saves nothing.
+  const handleSocialCombinedPdf = async (biz, index, platform) => {
+    const key = `${index}-${platform}`;
+    if (!biz.website || !(biz.audit || {})[platform] || socialPdfBusy[key]) return;
+    setSocialPdfBusy(b => ({ ...b, [key]: true }));
+    try {
+      const made = await createPdfReport({ website: biz.website, company: biz.company || '', apiBase: API_BASE, download: false });
+      const payload = {
+        ...socialPdfPayload(biz, platform, 'long'),
+        // internal material is never sent for a client file (the long audit ignores it anyway)
+        email: { subject: '', body: '' }, lead_score: null, audience_quality: null,
+        report_job_id: made.job_id,
+      };
+      const res = await axios.post(`${API_BASE}/api/combined-pdf`, payload, { responseType: 'blob' });
+      saveBlob(res.data, `${(biz.company || payload.handle || 'Business').replace(/[^A-Za-z0-9]+/g, '-')}-website-and-instagram-audit.pdf`);
+    } catch (err) {
+      alert('Combined PDF failed: ' + await blobErrorMessage(err));
     } finally {
       setSocialPdfBusy(b => ({ ...b, [key]: false }));
     }
@@ -2889,16 +2923,31 @@ function App() {
                   className="reject-btn"
                   value=""
                   disabled={!!socialPdfBusy[chanKey]}
-                  title="Small: the email, profile numbers, issues and scores, for us. Long: the full audit written for the business, safe to attach (no scores, no email)."
+                  title={'Small: the email, profile numbers, issues and scores, for us. Long: the full audit written for the business, safe to attach (no scores, no email).'
+                    + (platform === 'instagram'
+                      ? (biz.website
+                        ? ' Combined: the website design audit followed by the long Instagram audit in one file, safe to attach (takes about a minute).'
+                        : ' Combined needs a website for this business.')
+                      : '')}
                   style={{ cursor: 'pointer', padding: '2px 10px', fontSize: '12px', marginLeft: 'auto' }}
                   onChange={(ev) => {
                     const choice = ev.target.value;
                     if (choice === 'small' || choice === 'long') handleSocialPdf(biz, index, platform, choice);
+                    if (choice === 'combined') handleSocialCombinedPdf(biz, index, platform);
                   }}
                 >
                   <option value="">{socialPdfBusy[chanKey] ? 'Making PDF...' : 'Download PDF ▾'}</option>
                   <option value="small">Small PDF: email, profile and scores</option>
                   <option value="long" disabled={!(data.issues || []).length && !data.profile.followers}>Long PDF: full Instagram audit</option>
+                  {platform === 'instagram' && (
+                    <option
+                      value="combined"
+                      disabled={!biz.website || (!(data.issues || []).length && !data.profile.followers)}
+                      title={biz.website ? 'The website audit and the Instagram audit in one PDF.' : 'No website for this business, so there is no website audit to combine.'}
+                    >
+                      {biz.website ? 'Combined PDF: website + Instagram audit' : 'Combined PDF: website + Instagram audit (no website)'}
+                    </option>
+                  )}
                 </select>
               )}
             </div>

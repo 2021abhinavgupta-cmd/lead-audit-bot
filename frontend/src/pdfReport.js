@@ -29,3 +29,16 @@ export async function createPdfReport({ website, company, apiBase = '', download
 export function reportErrorMessage(err) {
   return err?.response?.data?.detail || err?.message || 'The report could not be created.';
 }
+
+// Same as reportErrorMessage for a request made with responseType 'blob',
+// where an error body arrives as a Blob holding the JSON {detail}.
+export async function blobErrorMessage(err) {
+  const body = err?.response?.data;
+  if (body && typeof body.text === 'function') {
+    try {
+      const detail = JSON.parse(await body.text())?.detail;
+      if (detail) return typeof detail === 'string' ? detail : JSON.stringify(detail);
+    } catch { /* not JSON, fall through */ }
+  }
+  return reportErrorMessage(err);
+}
