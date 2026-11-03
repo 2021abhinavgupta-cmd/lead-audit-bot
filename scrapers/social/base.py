@@ -43,16 +43,20 @@ class SocialProfile:
     #   {"type": "image" | "video" | "carousel" | "",   "" = not readable
     #    "caption": str | None,                          None = not readable
     #    "likes": int | None, "comments": int | None,    None = not readable
-    #    "ts": int | None}                               unix seconds (UTC), None = not readable
-    # None always means "not read", never 0.
+    #    "ts": int | None,                               unix seconds (UTC), None = not readable
+    #    "code": str | None}                             post shortcode (public Instagram read only)
+    # None always means "not read", never 0. Readers may add optional keys
+    # (e.g. "comment_texts": list[str]); consumers must use .get().
     recent_posts: list[dict] = field(default_factory=list)
     # True only when EVERY recent post's caption / type was readable. The
     # caption and format checks in analyzer/social_audit.py run only then.
     captions_known: bool = False
     formats_known: bool = False
-    # True only when likes AND comments were read for every recent post: the
-    # logged-in session reader. A public (logged-out) read never sees them,
-    # so every engagement check is skipped for it.
+    # True when likes AND comments were read: for every recent post (the
+    # logged-in session reader), or for at least 4 recent posts through their
+    # public embed pages (a public Instagram read; the other posts keep
+    # likes/comments None). avg_engagement_rate then covers the posts read
+    # only. Per-post checks must still skip posts whose counts are None.
     engagement_known: bool = False
     # Story highlights shown on the profile, None when not read.
     highlights_count: int | None = None

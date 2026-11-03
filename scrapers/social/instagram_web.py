@@ -32,10 +32,25 @@ Two layers, both read only (never like / follow / DM / post):
    timestamps and like/comment counts. An expired / checkpointed session
    falls back to the public reader with a note asking for a re-login.
 
-Politeness lives in InstagramThrottle (module level): 20 s between profile
-loads, at most 20 per rolling hour, and a 60 minute cooldown after a 429 /
-challenge / login wall, during which every read returns analyzed=False with
-a note instead of touching Instagram.
+3. POST EMBED reader, no login: https://www.instagram.com/p/<code>/embed/captioned/
+   is Instagram's public "embed this post" page. Verified with ONE live
+   logged-out load (mmga.agency reel De_6hPjswg-, 2026-11-03), it carries a
+   ServerJS script whose PolarisEmbedSimple init holds "contextJSON" with
+   gql_data.shortcode_media: edge_liked_by.count (44), edge_media_to_comment
+   .count (2), video_view_count (278), caption, __typename / is_video /
+   product_type, owner {username, is_verified, edge_followed_by}. The page
+   also shows "44 likes" in <div class="SocialProof">. It has NO timestamp
+   and NO comment text ("View all comments" only). After a public profile
+   read, read_instagram loads the embeds of up to PUBLIC_EMBED_POSTS recent
+   posts to fill their likes / comments; engagement_known and the
+   engagement rate are set only when at least EMBED_MIN_POSTS were read.
+
+Politeness lives in InstagramThrottle (module level): 20 s between loads
+(profile or embed), at most 20 per rolling hour, and a 60 minute cooldown
+after a 429 / challenge / login wall, during which every read returns
+analyzed=False with a note instead of touching Instagram. A 429 or login
+wall on an EMBED pauses only the embeds (its own 60 minute window), never
+the profile read.
 """
 
 import json
@@ -57,6 +72,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 # Use the alt-text dates of the 12 posts a logged-out visitor sees to judge
 # posting activity. Flip to False to make every public read header only.
 PUBLIC_ACTIVITY_FROM_ALT_TEXT = True
+# After a public read, load the public embed page of this many recent posts
+# (each one is a throttled load) to read their likes and comments. 0 = off.
+PUBLIC_EMBED_POSTS = 6
+# Engagement (engagement_known, avg_engagement_rate) only from this many
+# embed-read posts or more.
+EMBED_MIN_POSTS = 4
 
 NOTE_PUBLIC_ONLY = "Limited view: public profile data only (post dates and engagement not available)"
 NOTE_PUBLIC_WITH_DATES = ("Limited view: public profile data only (engagement not available; "
@@ -69,7 +90,12 @@ NOTE_LOGIN_WALL = ("Instagram showed a login wall instead of the profile, so it 
 NOTE_UNREADABLE = "Instagram served a page this reader does not recognise, so the profile could not be read."
 NOTE_INVALID = "Not a valid Instagram username."
 
+NOTE_EMBED_READ = "likes and comments read from {n} recent posts"
+NOTE_EMBED_FAILED = "Likes and comments could not be read from the post previews this time."
+
 _HANDLE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
+_SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SOCIAL_PROOF = re.compile(r'class="SocialProof"[^>]*>\s*<a\b[^>]*>\s*([\d.,]+\s*[KkMm]?)\s+likes?\s*</a>', re.I)
 _OG_COUNTS = re.compile(
     r"([\d.,]+\s*[KkMm]?)\s+Followers?,\s*([\d.,]+\s*[KkMm]?)\s+Following,\s*([\d.,]+\s*[KkMm]?)\s+Posts?",
     re.I,
@@ -107,6 +133,7 @@ class InstagramThrottle:
         self._last = None
         self._locked_until = 0.0
         self._session_dead_until = 0.0
+        self._embed_locked_until = 0.0
 
     def _prune(self, now):
         while self._loads and now - self._loads[0] >= 3600:
@@ -151,6 +178,22 @@ class InstagramThrottle:
 
     def mark_session_dead(self) -> None:
         self._session_dead_until = self._clock() + self.cooldown
+
+    def embed_blocked_note(self) -> str | None:
+        """Why post embeds may not load right now (their own cooldown, or
+        anything that blocks every load). Consumes no slot."""
+        now = self._clock()
+        if now < self._embed_locked_until:
+            mins = max(1, int((self._embed_locked_until - now + 59) // 60))
+            return f"Instagram post previews are paused for about {mins} more minutes after Instagram pushed back."
+        return self.blocked_note()
+
+    def trip_embed(self) -> None:
+        """A 429 / login wall on a post embed: pause embeds only. The profile
+        page is a different path and keeps working."""
+        self._embed_locked_until = self._clock() + self.cooldown
+        print(f"[InstagramWeb] Instagram pushed back on a post embed, "
+              f"pausing post previews for {self.cooldown // 60} minutes")
 
 
 _THROTTLE = InstagramThrottle()
@@ -197,6 +240,11 @@ def normalize_handle(raw: str) -> str | None:
     if ".." in s or s.strip(".") == "":
         return None
     return s if _HANDLE_RE.match(s) else None
+
+
+def valid_shortcode(code) -> bool:
+    """A post shortcode safe to put in an embed URL."""
+    return isinstance(code, str) and bool(_SHORTCODE_RE.match(code))
 
 
 def has_session_cookie(cookies) -> bool:
@@ -424,7 +472,7 @@ def parse_public_page(html: str, handle: str, now: datetime, final_url: str = ""
     # Logged out: type and caption are on the page, likes and comments never.
     p.recent_posts = [
         {"type": _post_type(n), "caption": _public_caption(n), "likes": None, "comments": None,
-         "ts": _day_ts(d)}
+         "ts": _day_ts(d), "code": n.get("code") if valid_shortcode(n.get("code")) else None}
         for n, d in zip(nodes, dates)
     ]
     p.captions_known = bool(nodes) and all(x["caption"] is not None for x in p.recent_posts)
@@ -556,6 +604,81 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
 
 
 # ---------------------------------------------------------------------------
+# post embed page
+# ---------------------------------------------------------------------------
+
+def embed_url(code: str) -> str:
+    return f"https://www.instagram.com/p/{code}/embed/captioned/"
+
+
+def _embed_context_media(html: str) -> dict:
+    """gql_data.shortcode_media out of the embed's contextJSON, {} when absent."""
+    key = '"contextJSON":'
+    dec = json.JSONDecoder()
+    start = 0
+    while True:
+        i = html.find(key, start)
+        if i == -1:
+            return {}
+        start = i + len(key)
+        while start < len(html) and html[start].isspace():
+            start += 1
+        try:
+            raw, _ = dec.raw_decode(html, start)
+            data = json.loads(raw) if isinstance(raw, str) else None
+        except ValueError:
+            continue
+        media = ((data or {}).get("gql_data") or {}).get("shortcode_media") if isinstance(data, dict) else None
+        if isinstance(media, dict):
+            return media
+
+
+def parse_post_embed(html: str, final_url: str = "") -> tuple[str, dict | None]:
+    """Read one post's public embed page. kind is ok / login_wall /
+    unreadable. On ok the dict is
+      {"shortcode", "likes", "comments", "views", "type", "caption", "owner",
+       "owner_followers"}
+    with None for anything the page did not show (a hidden like count is
+    None, never 0). The embed never shows a timestamp or comment text."""
+    html = html or ""
+    low_url = (final_url or "").lower()
+    if "/accounts/login" in low_url or "/challenge" in low_url:
+        return "login_wall", None
+    media = _embed_context_media(html)
+    proof = _SOCIAL_PROOF.search(html)
+    if not media and not proof:
+        low = html.lower()
+        if 'name="password"' in low or "loginform" in low:
+            return "login_wall", None
+        return "unreadable", None
+
+    hidden = bool(media.get("like_and_view_counts_disabled"))
+    likes = None if hidden else _count_or_none(media, "edge_liked_by")
+    if likes is None and not hidden:
+        likes = _count_or_none(media, "edge_media_preview_like")
+    if likes is None and proof and not hidden:
+        likes = _to_int(proof.group(1))
+    comments = _count_or_none(media, "edge_media_to_comment")
+    if comments is None:
+        comments = _count_or_none(media, "edge_media_preview_comment")
+    views = media.get("video_view_count")
+    owner = media.get("owner") if isinstance(media.get("owner"), dict) else {}
+    cap_edges = ((media.get("edge_media_to_caption") or {}).get("edges") or []) \
+        if isinstance(media.get("edge_media_to_caption"), dict) else []
+    caption = ((cap_edges[0] or {}).get("node") or {}).get("text") if cap_edges else None
+    return "ok", {
+        "shortcode": media.get("shortcode"),
+        "likes": likes,
+        "comments": comments,
+        "views": views if isinstance(views, int) and not isinstance(views, bool) and views >= 0 else None,
+        "type": _post_type(media) if media else "",
+        "caption": caption.strip() if isinstance(caption, str) else None,
+        "owner": str(owner.get("username") or "").lower() or None,
+        "owner_followers": _count_or_none(owner, "edge_followed_by"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # fetch layer (Playwright). Not exercised by tests; read_instagram takes the
 # fetchers as parameters so tests pass fakes.
 # ---------------------------------------------------------------------------
@@ -619,6 +742,27 @@ def _playwright_public_fetch(handle: str) -> PublicPage:
             try:
                 page.wait_for_selector('meta[property="og:description"]', state="attached", timeout=5_000)
             except Exception:  # noqa: BLE001  (a missing meta is classified by the parser)
+                pass
+            return PublicPage(resp.status if resp else 0, page.url, page.content())
+        finally:
+            browser.close()
+
+
+def _playwright_embed_fetch(code: str) -> PublicPage:
+    """One logged-out load of a post's public embed page, same short-lived
+    browser and fingerprint as the public profile reader."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        try:
+            ctx = browser.new_context(service_workers="block", **browser_identity(p))
+            ctx.route("**/*", _block_heavy)
+            page = ctx.new_page()
+            resp = page.goto(embed_url(code), wait_until="domcontentloaded", timeout=30_000)
+            try:
+                page.wait_for_selector(".SocialProof, .EmbedFrame, .Embed", state="attached", timeout=5_000)
+            except Exception:  # noqa: BLE001  (an empty page is classified by the parser)
                 pass
             return PublicPage(resp.status if resp else 0, page.url, page.content())
         finally:
@@ -710,10 +854,96 @@ def _join(*notes) -> str:
     return " ".join(n for n in notes if n)
 
 
-def read_instagram(handle: str, *, public_fetch=None, session_fetch=_DEFAULT, throttle=None,
-                   now: datetime | None = None) -> SocialProfile:
+def _read_post_embed(code: str, handle: str, fetch, th) -> dict:
+    """One throttled embed load (caller holds _READ_LOCK). Returns
+    {"status": ok | invalid | blocked | error | rate_limited | login_wall |
+    unreadable | other_owner, "note": str, ...parse_post_embed fields on ok}."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    if not valid_shortcode(code):
+        return {"status": "invalid", "note": ""}
+    note = th.embed_blocked_note() or th.acquire()
+    if note:
+        return {"status": "blocked", "note": note}
+    try:
+        page = fetch(code)
+    except PlaywrightError as e:
+        print(f"[InstagramWeb] embed load failed: {e}")
+        return {"status": "error", "note": ""}
+    if page.status == 429:
+        th.trip_embed()
+        return {"status": "rate_limited", "note": ""}
+    kind, data = parse_post_embed(page.html, page.url)
+    if kind == "login_wall":
+        th.trip_embed()
+        return {"status": "login_wall", "note": ""}
+    if kind != "ok":
+        return {"status": "unreadable", "note": ""}
+    if handle and data.get("owner") and data["owner"] != handle:
+        # a collab post owned by another account: its likes are not this audience's
+        return {"status": "other_owner", "note": "", **data}
+    return {"status": "ok", "note": "", **data}
+
+
+def read_post_embed(shortcode: str, *, handle: str = "", fetch=None, throttle=None) -> dict:
+    """Read one post's likes / comments from its public embed page, through
+    the shared throttle. See _read_post_embed for the result shape."""
+    with _READ_LOCK:
+        return _read_post_embed(shortcode, (handle or "").lower(), fetch or _playwright_embed_fetch,
+                                throttle or _THROTTLE)
+
+
+_STOP_STATUSES = ("blocked", "error", "rate_limited", "login_wall")
+
+
+def _engagement_note(note: str, n: int) -> str:
+    read = NOTE_EMBED_READ.format(n=n)
+    if "post dates and engagement not available" in note:
+        return note.replace("post dates and engagement not available", f"post dates not available; {read}")
+    if "engagement not available" in note:
+        return note.replace("engagement not available", read)
+    return _join(note, read[0].upper() + read[1:] + ".")
+
+
+def _fill_from_embeds(p: SocialProfile, handle: str, fetch, th) -> None:
+    """Fill likes / comments of up to PUBLIC_EMBED_POSTS recent posts from
+    their embed pages. Only posts actually read get counts; engagement is
+    computed only from EMBED_MIN_POSTS or more read posts."""
+    if PUBLIC_EMBED_POSTS <= 0 or fetch is None:
+        return
+    targets = [x for x in p.recent_posts if x.get("code") and x.get("likes") is None][:PUBLIC_EMBED_POSTS]
+    read = []
+    stopped = False
+    for post in targets:
+        r = _read_post_embed(post["code"], handle, fetch, th)
+        if r["status"] in _STOP_STATUSES:
+            stopped = True
+            break
+        if r["status"] != "ok":
+            continue
+        if r.get("likes") is not None:
+            post["likes"] = r["likes"]
+        if r.get("comments") is not None:
+            post["comments"] = r["comments"]
+        if post["likes"] is not None and post["comments"] is not None:
+            read.append(post)
+    if len(read) >= EMBED_MIN_POSTS and p.followers > 0:
+        n = len(read)
+        likes = sum(x["likes"] for x in read)
+        comments = sum(x["comments"] for x in read)
+        p.engagement_known = True
+        p.avg_engagement_rate = round((likes / n + comments / n) / p.followers * 100, 2)
+        p.note = _engagement_note(p.note, n)
+    elif targets and (stopped or not read):
+        p.note = _join(p.note, NOTE_EMBED_FAILED)
+
+
+def read_instagram(handle: str, *, public_fetch=None, session_fetch=_DEFAULT, embed_fetch=_DEFAULT,
+                   throttle=None, now: datetime | None = None) -> SocialProfile:
     """Read one Instagram profile: spare session first when one is saved,
-    else (or when it is dead) the public logged-out page.
+    else (or when it is dead) the public logged-out page, whose recent posts
+    then get likes / comments from their public embed pages (embed_fetch,
+    None = skip).
 
     Returns a SocialProfile, analyzed=False with a note for every expected
     failure (invalid name, private, not found, login wall, 429, cooldown,
@@ -731,6 +961,8 @@ def read_instagram(handle: str, *, public_fetch=None, session_fetch=_DEFAULT, th
     public_fetch = public_fetch or _playwright_public_fetch
     if session_fetch is _DEFAULT:
         session_fetch = _default_session_fetch(session_dir())
+    if embed_fetch is _DEFAULT:
+        embed_fetch = _playwright_embed_fetch
 
     with _READ_LOCK:
         note = th.blocked_note()
@@ -790,5 +1022,7 @@ def read_instagram(handle: str, *, public_fetch=None, session_fetch=_DEFAULT, th
         kind, profile = parse_public_page(page.html, h, now, final_url=page.url)
         if kind == "login_wall":
             th.trip()
+        if kind == "ok" and profile.analyzed:
+            _fill_from_embeds(profile, h, embed_fetch, th)
         profile.note = _join(profile.note, session_note)
         return profile
