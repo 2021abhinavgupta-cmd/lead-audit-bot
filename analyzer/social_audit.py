@@ -424,15 +424,24 @@ def _caption_issues(posts: list[dict]) -> list[SocialIssue]:
 # ---------------------------------------------------------------------------
 
 _ISSUE_POINTS = {"high": 15, "medium": 10, "low": 5}
+# analyzer/audience_quality.py label -> lead score change. "unknown" and
+# "mixed" change nothing.
+_AUDIENCE_POINTS = {"suspect": -15, "healthy": 5}
+_AUDIENCE_REASON = {
+    "suspect": "The audience looks less engaged than its size suggests, so it is worth checking before pitching.",
+    "healthy": "Engagement looks healthy for the size of the audience.",
+}
 
 
-def lead_score(profile: SocialProfile | None, issues: list[SocialIssue]) -> dict:
+def lead_score(profile: SocialProfile | None, issues: list[SocialIssue], audience: dict | None = None) -> dict:
     """How worth pitching this profile is, from known data only:
     {"score": 0..100, "label": "strong" | "maybe" | "weak", "reasons": [...]}.
 
     Stronger: posting recently AND a real audience AND fixable issues.
     Weak: abandoned, private, or not analyzed. Unknown posting activity caps
     the lead at "maybe" (we cannot say anyone is running the account).
+    audience: analyzer.audience_quality's result; "suspect" lowers the score
+    by 15, "healthy" raises it by 5, anything else changes nothing.
     Deterministic; reasons are plain language for the Social tab, never fed
     to the outreach model."""
     if profile is None or not profile.analyzed:
@@ -480,6 +489,11 @@ def lead_score(profile: SocialProfile | None, issues: list[SocialIssue]) -> dict
         reasons.append(f"{n} fixable issue{'s' if n != 1 else ''} found, the biggest being {top.label.lower()}.")
     else:
         reasons.append("No clear issues found, so there is little to pitch.")
+
+    aq_label = (audience or {}).get("label")
+    if aq_label in _AUDIENCE_POINTS:
+        score += _AUDIENCE_POINTS[aq_label]
+        reasons.append(_AUDIENCE_REASON[aq_label])
 
     score = max(0, min(score, cap, 100))
     label = "strong" if score >= 70 else "maybe" if score >= 40 else "weak"

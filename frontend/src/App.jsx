@@ -2578,6 +2578,43 @@ function App() {
   };
   const SEVERITY_COLOR = { high: '#ef4444', medium: '#f59e0b', low: '#64748b' };
   const LEAD_SCORE_COLOR = { strong: '#10b981', maybe: '#f59e0b', weak: '#94a3b8' };
+  const AUDIENCE_COLOR = { healthy: '#10b981', mixed: '#f59e0b', suspect: '#ef4444', unknown: '#94a3b8' };
+
+  // Internal only: audience quality is for us, never sent to the outreach copy.
+  const renderAudienceQuality = (aq) => {
+    if (!aq) return null;
+    const signals = aq.signals || [];
+    return (
+      <div style={{ margin: '8px 0', padding: '8px 10px', border: '1px dashed #cbd5e1', borderRadius: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', fontSize: '12px' }}>
+          <span style={{ fontWeight: 700, color: '#475569' }}>Audience quality</span>
+          <span style={{
+            fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '999px',
+            color: '#fff', background: AUDIENCE_COLOR[aq.label] || '#94a3b8',
+          }}>
+            {aq.label}{aq.score !== null && aq.score !== undefined ? ` · ${aq.score}` : ''}
+          </span>
+        </div>
+        {aq.label === 'unknown' && signals.length === 0 && (
+          <p style={{ color: '#94a3b8', fontSize: '12px', margin: '4px 0 0' }}>
+            Not enough likes and comments were read to judge the audience.
+          </p>
+        )}
+        {signals.length > 0 && (
+          <ul style={{ margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px', color: '#475569' }}>
+            {signals.map((s, k) => (
+              <li key={k}>
+                <span style={{ color: SEVERITY_COLOR[s.severity], fontWeight: 700 }}>{s.severity}</span>{': '}{s.detail}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p style={{ color: '#94a3b8', fontSize: '11px', margin: '4px 0 0', fontStyle: 'italic' }}>
+          Internal only, not used in the email.
+        </p>
+      </div>
+    );
+  };
 
   const fetchSocialDrafts = async () => {
     try {
@@ -2810,6 +2847,7 @@ function App() {
                 {data.profile.note && data.profile.note !== data.note && (
                   <p style={{ color: '#94a3b8', fontSize: '12px', margin: '2px 0' }}>{data.profile.note}</p>
                 )}
+                {data.profile.analyzed !== false && renderAudienceQuality(data.audience_quality)}
                 {(data.issues || []).length > 0 && (
                   <ul style={{ margin: '8px 0', paddingLeft: '18px' }}>
                     {data.issues.map((iss, k) => (

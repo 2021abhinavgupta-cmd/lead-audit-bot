@@ -36,6 +36,7 @@ from analyzer.visuals import (
 )
 from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
+from analyzer.audience_quality import audience_quality, outreach_issue as audience_outreach_issue
 from analyzer.social_audit import audit_profile, generate_social_outreach, lead_score
 from analyzer.social_link import check_bio_link
 from scrapers.social.discover import find_social_handles
@@ -2238,13 +2239,14 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
 
         if profile is None:
             results[platform] = {"profile": None, "issues": [], "outreach": {}, "note": "could not analyze this profile",
-                                 "lead_score": lead_score(None, [])}
+                                 "lead_score": lead_score(None, []), "audience_quality": audience_quality(None)}
             continue
         if not getattr(profile, "analyzed", True):
             results[platform] = {
                 "profile": _dataclass_asdict(profile), "issues": [], "outreach": {},
                 "note": profile.note or "could not analyze this profile",
                 "lead_score": lead_score(profile, []),
+                "audience_quality": audience_quality(profile),
             }
             continue
 
@@ -2260,6 +2262,13 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
                 link_check = None
 
         issues = audit_profile(profile, website=req.website or "", link_check=link_check)
+        # INTERNAL: audience quality goes to the UI only. The single soft
+        # "posts are not reaching the audience" line is the one thing allowed
+        # into the outreach, and only when the audit has not already said so.
+        audience = audience_quality(profile)
+        reach = audience_outreach_issue(audience)
+        if reach and not any(i.label == "Low engagement" for i in issues):
+            issues.append(reach)
         issue_dicts = [_dataclass_asdict(i) for i in issues]
         outreach = {}
         total_cost = 0.0
@@ -2279,7 +2288,8 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
         results[platform] = {
             "profile": _dataclass_asdict(profile), "issues": issue_dicts, "outreach": outreach,
             "link_check": link_check,
-            "lead_score": lead_score(profile, issues),
+            "lead_score": lead_score(profile, issues, audience=audience),
+            "audience_quality": audience,
         }
 
     return {"results": results}
