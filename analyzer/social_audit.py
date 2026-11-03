@@ -507,11 +507,70 @@ def lead_score(profile: SocialProfile | None, issues: list[SocialIssue], audienc
 # Instructions are spelled out in words, so every digit in the prompt comes
 # from the business name, the handle or the issue list (tested).
 _CHANNEL_SHAPE = {
-    "email": "Write a cold outreach EMAIL. Return a subject line and a body of sixty to one hundred and ten words. "
-             "The subject must be specific and hint at the problem, never a bland label.",
+    "email": (
+        "Write a cold SALES email of one hundred and eighty to two hundred and fifty words, in short paragraphs of one to three "
+        "sentences. Voice: confident and direct, like a sharp salesperson who has studied this exact account, not a template. "
+        "Structure: "
+        "First paragraph: state the TOP ISSUE as customers, bookings or sales being lost, in plain terms. "
+        "Second paragraph: if MEASURED FACTS include engagement, put the real numbers next to each other (audience size against "
+        "average likes and comments per post) and say what that gap means for the business. Quote those numbers exactly as given. "
+        "Third paragraph: walk through every other issue in one short sentence each, saying what it costs the business in "
+        "customers, never inventing a number. "
+        "Fourth paragraph: start with 'Here is what I would do' and describe the fixes in a short sequence of sentences, one per issue. "
+        "Fifth paragraph: one sentence introducing MMGA as a small agency that fixes exactly this, then the PROOF LINE if one is given. "
+        "Last paragraph: offer to send a one page plan for this account, free, within a day, and make the cost of waiting felt "
+        "without pressure or threats. "
+        "Return a subject line of at most fifty characters that is specific and creates curiosity about the problem."
+    ),
     "dm": "Write a short Instagram DM. No subject. Two or three sentences, casual, one issue, one soft ask.",
     "whatsapp": "Write a short WhatsApp message. No subject. Two or three sentences, casual and friendly, light on emoji.",
 }
+
+
+def _proof_line() -> str:
+    import config
+    return (getattr(config, "SOCIAL_PROOF_LINE", "") or "").strip()
+
+
+def _fmt_num(n: float) -> str:
+    if n >= 10:
+        return f"{int(round(n)):,}"
+    return f"{n:.1f}".removesuffix(".0")
+
+
+def measured_facts(profile) -> tuple[list[str], set[str]]:
+    """Real numbers read from the account, as plain sentences the email may
+    quote, plus the set of digit strings those sentences contain. Engagement
+    facts only when at least four recent posts were actually counted."""
+    facts: list[str] = []
+    if profile.followers and profile.followers > 0:
+        facts.append(f"The account has {profile.followers:,} followers")
+    read = [p for p in (profile.recent_posts or [])
+            if isinstance(p, dict) and p.get("likes") is not None and p.get("comments") is not None]
+    if getattr(profile, "engagement_known", False) and len(read) >= 4:
+        likes = sum(p["likes"] for p in read) / len(read)
+        comments = sum(p["comments"] for p in read) / len(read)
+        facts.append(f"Across its last {len(read)} posts it averages {_fmt_num(likes)} likes and "
+                     f"{_fmt_num(comments)} comments per post")
+        if profile.avg_engagement_rate and profile.avg_engagement_rate > 0:
+            facts.append(f"That is an engagement rate of about {profile.avg_engagement_rate:.1f} percent of its followers per post")
+    nums = {m.replace(",", "") for f in facts for m in _re.findall(r"\d[\d,]*\.?\d*", f)}
+    return facts, nums
+
+
+def _numbers_in(text: str) -> set[str]:
+    return {m.replace(",", "").rstrip(".") for m in _re.findall(r"\d[\d,]*\.?\d*", text or "")}
+
+
+def _disallowed_numbers(body: str, profile, issues, company: str) -> set[str]:
+    """Digits in the email that are not measured facts, the business name, the
+    handle, the issue wording or the proof line."""
+    _facts, nums = measured_facts(profile)
+    allowed = set(nums)
+    for source in (company, profile.handle, _proof_line(),
+                   " ".join(f"{i.label} {i.detail}" for i in issues)):
+        allowed |= _numbers_in(source)
+    return {n for n in _numbers_in(body) if n not in allowed}
 
 
 def _build_outreach_prompt(company, profile, issues, channel, your_name):
@@ -526,13 +585,24 @@ def _build_outreach_prompt(company, profile, issues, channel, your_name):
     else:
         issue_lines = "- (no specific issues found)"
     shape = _CHANNEL_SHAPE.get(channel, _CHANNEL_SHAPE["email"])
+    facts_block = ""
+    if channel == "email":
+        facts, _nums = measured_facts(profile)
+        if facts:
+            facts_block = ("MEASURED FACTS (real numbers read from the account, you may quote these exactly and no other number):\n"
+                           + "\n".join(f"- {f}" for f in facts) + "\n\n")
+        proof = _proof_line()
+        if proof:
+            facts_block += f"PROOF LINE (use as one sentence, word for word):\n- {proof}\n\n"
     return (
         f"You write outreach for MMGA, a small agency that fixes social media presence for local businesses.\n\n"
         f"Business: {company}\n"
         f"Platform: {profile.platform}\n"
         f"Handle: @{profile.handle}\n\n"
-        f"ISSUES FOUND (these are the ONLY facts you may use, do not invent any number, metric or claim beyond this list):\n"
+        f"ISSUES FOUND (these are the ONLY facts you may use, do not invent any number, metric or claim beyond this list"
+        f"{' and the measured facts' if facts_block else ''}):\n"
         f"{issue_lines}\n\n"
+        f"{facts_block}"
         f"{shape}\n\n"
         f"Rules:\n"
         f"- Open with the top issue stated as a business problem, not a compliment or pleasantry.\n"
@@ -595,4 +665,26 @@ def generate_social_outreach(company, profile, issues, channel, your_name="Kshit
         return {"subject": "", "body": "", "cost": 0.0}
     parsed = _parse_outreach_json(text) or {}
     subject = "" if channel in ("dm", "whatsapp") else str(parsed.get("subject", ""))
-    return {"subject": subject, "body": str(parsed.get("body", "")), "cost": float(cost or 0.0)}
+    body = str(parsed.get("body", ""))
+    total_cost = float(cost or 0.0)
+
+    if channel == "email" and body:
+        bad = _disallowed_numbers(f"{subject} {body}", profile, issues, company)
+        if bad:
+            # One retry: the email used a number we did not measure.
+            retry_prompt = (prompt + "\n\nYour previous draft used numbers that are not in the measured facts: "
+                            + ", ".join(sorted(bad)) + ". Rewrite it using only the measured numbers, or no numbers.")
+            try:
+                text2, cost2 = call(retry_prompt)
+                total_cost += float(cost2 or 0.0)
+                parsed2 = _parse_outreach_json(text2) or {}
+                subject2 = str(parsed2.get("subject", ""))
+                body2 = str(parsed2.get("body", ""))
+                if body2 and not _disallowed_numbers(f"{subject2} {body2}", profile, issues, company):
+                    subject, body = subject2, body2
+                else:
+                    subject, body = "", ""
+            except Exception as e:  # noqa: BLE001
+                print(f"[SocialOutreach] retry failed: {e}")
+                subject, body = "", ""
+    return {"subject": subject, "body": body, "cost": total_cost}

@@ -101,14 +101,16 @@ def test_prompt_puts_the_strongest_issue_first_whatever_the_input_order():
 
 
 def test_prompt_contains_no_number_that_is_not_in_the_profile_or_issues():
+    from analyzer.social_audit import measured_facts
     p = _p(handle="acme2024", followers=3141, posts_count=271)
     issues = audit_profile(p)
     prompt = _build_outreach_prompt("Acme 7 Candles", p, issues, "email", "Kshitij")
-    allowed = "Acme 7 Candles " + p.handle + " " + " ".join(i.label + " " + i.detail for i in issues)
-    for num in re.findall(r"\d+", prompt):
+    _facts, fact_nums = measured_facts(p)
+    allowed = "Acme 7 Candles " + p.handle + " " + " ".join(i.label + " " + i.detail for i in issues) + " " + " ".join(fact_nums)
+    for num in re.findall(r"\d+", prompt.replace(",", "")):
         assert num in allowed, num
-    # profile numbers themselves are not handed to the model
-    assert "3141" not in prompt and "271" not in prompt
+    # only the measured audience size is handed over, never the post count
+    assert "3,141 followers" in prompt and "271" not in prompt
 
 
 def test_generate_sends_the_ordered_prompt():
