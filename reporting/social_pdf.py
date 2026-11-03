@@ -5,11 +5,14 @@ The two Social tab PDFs, as self-contained HTML for reporting.report.render_pdf.
     measured profile numbers, the lead score, the issue list, the email
     exactly as it stands in the editor, and a clearly labelled "Internal"
     audience quality block.
-  * LONG (client facing, safe to attach to an email to the prospect): a short
-    intro, the measured profile numbers, one finding card per issue (what we
-    found, why it matters, what we would do), a prioritised action plan and
-    a closing next step. It NEVER carries the lead score, the audience
-    quality, the reader's notes or the outreach email.
+  * LONG (client facing, safe to attach to an email to the prospect): drawn in
+    the website design review's theme (reporting/theme.py) so the combined PDF
+    reads as one document: a dark cover, "The short version" with the top three
+    fixes and the measured profile numbers, one numbered finding per issue (what
+    we found, why it matters, what we would do), "What we'd do first" and the
+    "Want us to do it?" box. Footer page numbers start after start_page (the
+    website part's page count in the combined PDF). It NEVER carries the lead
+    score, the audience quality, the reader's notes or the outreach email.
 
 Every value from the request is html escaped. The copy owned here (FIX_TEXT,
 WHY_TEXT and the fixed sentences) follows the project's copy rules: plain
@@ -20,6 +23,8 @@ labels from that file's source, so a new label without copy fails the test).
 """
 
 from html import escape
+
+from reporting import theme
 
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 _TAG = {"high": "Fix first", "medium": "Next", "low": "Worth doing"}
@@ -336,53 +341,85 @@ def build_small_html(data: dict) -> str:
     return _doc(f"Social draft for {company or _handle(data)}", inner)
 
 
-def build_long_html(data: dict, *, sender_name: str = "", sender_email: str = "") -> str:
+# The long audit is drawn in the website report's theme (reporting/theme.py), so
+# the combined PDF reads as one document. Full bleed A4 pages: print with margin 0.
+LONG_MARGIN_MM = 0
+
+# issue severity -> the website report's impact class (t-serious is the orange tag)
+_IMPACT = {"high": "serious", "medium": "moderate", "low": "minor"}
+
+_LONG_CSS = (
+    f'.stats{{list-style:none;padding:0;margin:0}}'
+    f'.stats li{{font-size:10pt;line-height:1.5;padding:2.4mm 0;border-bottom:1px solid {theme.PANEL}}}'
+    '.stats li.n{display:flex;justify-content:space-between;align-items:baseline;gap:5mm}'
+    '.stats .k{display:block;font-size:8pt;letter-spacing:1.5px;text-transform:uppercase;color:#8a7a68}'
+    '.stats li.t .k{margin-bottom:1mm}'
+    f'.stats b{{font-size:17pt;color:{theme.ACCENT};line-height:1.1}}'
+    '.finding .cols p + h4{margin-top:4mm}'
+)
+
+# snapshot rows shown as a big orange number
+_BIG_STATS = ("Followers", "Following", "Posts")
+
+
+def _stats(rows) -> str:
+    """Counts as a big orange number on the right; sentences on a line of their own."""
+    items = []
+    for k, v in rows:
+        if v in (None, ""):
+            continue
+        if k in _BIG_STATS:
+            items.append(f'<li class="n"><span class="k">{_e(k)}</span><b>{_e(v)}</b></li>')
+        else:
+            items.append(f'<li class="t"><span class="k">{_e(k)}</span>{_e(v)}</li>')
+    return f'<ul class="stats">{"".join(items)}</ul>' if items else ""
+
+
+def build_long_html(data: dict, *, sender_name: str = "", sender_email: str = "", start_page: int = 1) -> str:
+    """The client facing audit. start_page is the page number of the cover: 1 on
+    its own, the website report's page count plus one inside the combined PDF."""
     profile = data.get("profile") or {}
     issues = _ordered(data.get("issues") or [])
     platform = _platform(data)
     company = (data.get("company") or "").strip() or _handle(data) or "this account"
     handle = _handle(data)
-    title = f"{platform} audit for {company}"
-    sub = " · ".join(x for x in (handle, (data.get("timestamp") or "").strip()) if x)
+    when = (data.get("timestamp") or "").strip()
+    who = company + (f" ({handle})" if handle and handle != company else "")
+    n = max(1, int(start_page or 1))
+    pages: list[str] = []
 
-    who = f"{_e(company)}" + (f" ({_e(handle)})" if handle and handle != company else "")
-    intro = (
-        f'<p>We looked at the {_e(platform)} profile of {who} the way a new visitor would. '
-        'Below are the numbers we read from the profile, what we found, why each point matters and what we '
-        'would change, ending with a short plan in the order we would tackle it.</p>'
-    )
-    snapshot = _rows(_snapshot_rows(profile, internal=False))
-    snap_html = (f'<h2>Profile snapshot</h2><table>{snapshot}</table>'
-                 '<p style="font-size:12px;color:#64748b;margin-top:8px">Numbers as read from the profile on the '
-                 'day of this audit.</p>') if snapshot else ""
+    pages.append(theme.cover(
+        kicker=f"{platform} audit" + (f" · {when}" if when else ""), name=company, subline=handle,
+        intro=(f"What a new visitor sees on your {platform} profile, what makes them trust you, "
+               "and what stands between them and getting in touch."),
+        footer_right=f"{len(issues)} finding{'s' if len(issues) != 1 else ''}"))
+    n += 1
 
-    cards = "".join(
-        f'<div class="card"><span class="tag {_e(i.get("severity"))}">{_e(_TAG.get(i.get("severity"), "Worth doing"))}</span>'
-        f'<h3>{_e(i.get("label"))}</h3>'
-        f'<h4>What we found</h4><p>{_e(i.get("detail"))}</p>'
-        f'<h4>Why it matters</h4><p>{_e(why_for(i.get("label")))}</p>'
-        f'<h4>What we would do</h4><p>{_e(fix_for(i.get("label")))}</p></div>'
-        for i in issues)
-    findings = (f'<h2>Findings</h2>{cards}' if cards else
-                '<h2>Findings</h2><p>We found nothing that clearly needs fixing on this profile.</p>')
+    fixes = [(i.get("label") or "", fix_for(i.get("label"))) for i in issues]
+    top = fixes[:3]
+    firsts = theme.first_list(top or [("Nothing urgent", "We found nothing that clearly needs fixing on this profile.")])
+    stats = _stats(_snapshot_rows(profile, internal=False))
+    snap = (f'<div><h4>Profile snapshot</h4>{stats}'
+            '<p class="cap">Numbers as read from the profile on the day of this audit.</p></div>') if stats else ""
+    pages.append(theme.page(
+        '<p class="kicker">The short version</p>'
+        f'<h1>{len(issues)} thing{"s" if len(issues) != 1 else ""} worth fixing</h1>'
+        f'<p style="max-width:150mm">We looked at the {_e(platform)} profile of {_e(who)} the way a new visitor '
+        'would and read the numbers on it. Every point below rests on what the profile shows, not on opinion.</p>'
+        f'<div class="cols" style="margin-top:8mm"><div class="box"><h4>Do these first</h4>{firsts}</div>{snap}</div>'
+        + theme.footer(theme.BRAND, n)))
+    n += 1
 
-    plan = ""
-    if issues:
-        steps = "".join(f'<li><b>{_e(i.get("label"))}</b>. {_e(fix_for(i.get("label")))}</li>' for i in issues)
-        plan = f'<h2>Action plan</h2><p>In the order we would do it, most important first.</p><ol class="plan">{steps}</ol>'
+    blocks = [theme.finding_block(
+        number=k, impact=_IMPACT.get(i.get("severity"), "minor"),
+        tag=_TAG.get(i.get("severity"), "Worth doing"), title=i.get("label") or "",
+        columns=[[("What we found", i.get("detail") or ""), ("Why it matters", why_for(i.get("label")))],
+                 [("What we would do", fix_for(i.get("label")))]])
+        for k, i in enumerate(issues, 1)]
+    for at in range(0, len(blocks), 2):          # two findings a page, like the website report
+        pages.append(theme.page("".join(blocks[at:at + 2]) + theme.footer(theme.BRAND, n)))
+        n += 1
 
-    name = (sender_name or "").strip()
-    mail = (sender_email or "").strip()
-    contact = (f"Just reply to this email or write to {_e(mail)}." if mail else "Just reply to this email.")
-    sign = f'<p>{_e(name)}</p>' if name else ""
-    nxt = (
-        '<div class="next"><h2>Next step</h2>'
-        '<p>If it helps, we can turn this into a one page plan for the account, free and with no obligation. '
-        f'{contact}</p>{sign}</div>'
-    )
-    inner = (
-        f'<div class="top"><small>{_e(platform.upper())} AUDIT</small><h1>{_e(title)}</h1>'
-        + (f'<div class="sub">{_e(sub)}</div>' if sub else "")
-        + f'</div><div class="in">{intro}{snap_html}{findings}{plan}{nxt}</div>'
-    )
-    return _doc(title, inner)
+    pages.append(theme.closing_page(top, contact_email=(sender_email or "").strip(), number=n,
+                                    sign=(sender_name or "").strip()))
+    return theme.document(f"{platform} audit for {company}", pages, extra_css=_LONG_CSS)

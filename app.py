@@ -2927,8 +2927,10 @@ async def social_pdf(
             sender_name=os.getenv("YOUR_NAME", "Kshitij Gupta"),
             sender_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
         )
+    # the long audit is full bleed pages in the website report's theme
+    margin = 14 if req.mode == "small" else reporting_social_pdf.LONG_MARGIN_MM
     try:
-        pdf = await reporting_report.render_pdf(page, margin_mm=14)
+        pdf = await reporting_report.render_pdf(page, margin_mm=margin)
     except Exception as ex:
         print(f"[SocialPdf] failed: {ex}")
         raise HTTPException(status_code=500, detail="The PDF could not be created.")
@@ -3000,7 +3002,7 @@ async def combined_pdf(
         sender_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
     )
     try:
-        social = await reporting_report.render_pdf(page, margin_mm=14)
+        social = await reporting_report.render_pdf(page, margin_mm=reporting_social_pdf.LONG_MARGIN_MM)
     except Exception as ex:
         print(f"[CombinedPdf] Instagram part failed: {ex}")
         raise HTTPException(status_code=500, detail="The Instagram part of the PDF could not be created.")

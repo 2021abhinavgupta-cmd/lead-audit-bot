@@ -73,7 +73,7 @@ def env(monkeypatch, tmp_path):
         return {"final_url": website, "design_probe": None}
 
     async def render_pdf(html, margin_mm=0):
-        if margin_mm == 14:        # the social long audit
+        if "<title>Instagram audit" in html:        # the social long audit
             got["social_html"].append(html)
             return tiny_pdf(SOCIAL_PAGES, 612, 792, title="Instagram audit")
         return tiny_pdf(WEBSITE_PAGES, 595, 842, title="Design review")

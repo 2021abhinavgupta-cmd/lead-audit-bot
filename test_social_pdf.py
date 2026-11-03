@@ -117,6 +117,8 @@ def test_filename_and_pdf_bytes(seen):
     assert seen["margin_mm"] == 14
     r = _post(body("long"))
     assert 'filename="Acme-Co-social-long.pdf"' in r.headers["content-disposition"]
+    # the long audit is full bleed A4 pages, like the website report
+    assert seen["margin_mm"] == 0
 
 
 # --------------------------------------------------------------------------- small
@@ -145,8 +147,11 @@ def test_small_email_keeps_its_line_breaks(seen):
 
 def test_long_has_a_card_with_fix_text_for_every_issue(seen):
     assert _post(body("long")).status_code == 200
-    text = _visible(seen["html"])
-    assert "Instagram audit for Acme Co" in text
+    html = seen["html"]
+    text = _visible(html)
+    assert "<title>Instagram audit for Acme Co</title>" in html
+    assert "Instagram audit" in text and "A free review for" in text and "Acme Co" in text
+    assert "@acme.cakes" in text and "3 November 2026" in text
     assert text.count("What we found") == len(ISSUES)
     assert text.count("Why it matters") == len(ISSUES)
     assert text.count("What we would do") == len(ISSUES)
@@ -156,15 +161,52 @@ def test_long_has_a_card_with_fix_text_for_every_issue(seen):
         assert social_pdf.why_for(issue["label"]) in text
     # the unknown label falls back to the generic text
     assert social_pdf.fix_for("Something new nobody mapped yet") == social_pdf.GENERIC_FIX
-    assert "Next step" in text and "one page plan" in text
+    assert "Want us to do it?" in text and "fixed quote" in text
 
 
 def test_long_action_plan_runs_high_to_low(seen):
     _post(body("long"))
     text = _visible(seen["html"])
-    plan = text[text.index("Action plan"):]
+    plan = text[text.index("What we'd do first"):]
     order = [plan.index(lbl) for lbl in ("Link in bio is broken", "No call to action in the bio", "Thin or empty bio")]
     assert order == sorted(order)
+    # like the website report, the closing plan is the top three, numbered by the theme
+    assert "Image posts underperform" not in plan
+
+
+def _page_numbers(html):
+    return [int(n) for n in re.findall(r'class="footer"><span>[^<]*</span><span>(\d+)</span>', html)]
+
+
+def test_long_is_built_in_the_website_report_theme(seen):
+    from reporting import theme
+    _post(body("long"))
+    html = seen["html"]
+    assert theme.CSS in html                                   # the very same stylesheet
+    pages = re.findall(r'<section class="page( dark)?">', html)
+    assert pages[0] == " dark" and pages[-1] == " dark"        # dark cover and closing page
+    assert all(p == "" for p in pages[1:-1])                   # cream pages between
+    assert len(pages) == 2 + 3 + 1                             # cover, short version, five findings two a page, closing
+    assert html.count('class="finding"') == len(ISSUES)
+    assert '<span class="num">01</span>' in html and '<span class="num">05</span>' in html
+    assert '<span class="tag t-serious">Fix first</span>' in html
+    assert "Where to start" in html and '<div class="cta"><h2>Want us to do it?</h2>' in html
+    assert f"<span>{theme.BRAND_LINE}</span>" in html and theme.PREPARED_BY in html
+    assert "Profile snapshot" in _visible(html) and "558" in _visible(html)
+
+
+def test_long_page_numbers_start_at_two_or_continue_from_start_page():
+    data = body("long")
+    # the cover is page one and, like the website cover, shows the findings count
+    assert _page_numbers(social_pdf.build_long_html(data)) == [2, 3, 4, 5, 6]
+    assert _page_numbers(social_pdf.build_long_html(data, start_page=9)) == [10, 11, 12, 13, 14]
+    assert "5 findings" in _visible(social_pdf.build_long_html(data))
+
+
+def test_long_without_issues_or_numbers_still_renders():
+    assert "Nothing urgent" in _visible(social_pdf.build_long_html(body("long", issues=[])))
+    html = social_pdf.build_long_html(body("long", profile={}))
+    assert "Profile snapshot" not in _visible(html) and html.count('class="finding"') == len(ISSUES)
 
 
 # Internal material from body(): none of it may reach a client facing PDF.
@@ -203,7 +245,10 @@ def test_long_generated_copy_has_no_dashes(seen, monkeypatch):
     monkeypatch.setenv("YOUR_NAME", "Kshitij Gupta")
     b = body("long", website="", profile_url="")
     _post(b)
-    text = _visible(seen["html"])
+    from reporting import theme
+    # the closing footer is the shared brand line of the website report, not generated copy
+    text = _visible(seen["html"]).replace(theme.BRAND_LINE, " ")
+    assert seen["html"].count(theme.BRAND_LINE) == 1
     for ch in ("-", "–", "—"):
         assert ch not in text, f"dash {ch!r} in the long PDF"
     for d in (social_pdf.FIX_TEXT, social_pdf.WHY_TEXT):
