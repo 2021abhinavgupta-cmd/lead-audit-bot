@@ -9,7 +9,7 @@ def _healthy(**over):
         followers=5000, following=800, posts_count=120,
         posts_last_30_days=12, posting_frequency="2-3x per week",
         avg_engagement_rate=2.1, uses_video=True, has_link_in_bio=True,
-        last_post_age_days=3,
+        last_post_age_days=3, engagement_known=True,
     )
     base.update(over)
     return SocialProfile(**base)

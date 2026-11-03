@@ -234,11 +234,6 @@ def audit_profile(profile: SocialProfile, *, website: str = "", link_check: dict
                 "Posts are going out only now and then, which is not enough to stay in front of followers.",
             ))
 
-        if plat in ("instagram", "facebook") and p.followers > 500 and 0 < p.avg_engagement_rate < 0.5:
-            issues.append(SocialIssue(
-                "medium", "Low engagement",
-                "Very few of the followers like or comment, so the posts are barely being seen.",
-            ))
 
         if not inactive and _uneven_posting(posts):
             issues.append(SocialIssue(
@@ -297,6 +292,11 @@ def audit_profile(profile: SocialProfile, *, website: str = "", link_check: dict
     if p.captions_known and len(posts) >= 3:
         issues.extend(_caption_issues(posts))
 
+    # Engagement checks: only with likes AND comments actually read (the
+    # logged in session reader). A public read never sees them.
+    if p.engagement_known and plat in ("instagram", "facebook"):
+        issues.extend(_engagement_issues(p, posts))
+
     if plat == "instagram" and p.following > p.followers and p.followers < 2000:
         issues.append(SocialIssue(
             "low", "Following more than followers",
@@ -320,6 +320,70 @@ def audit_profile(profile: SocialProfile, *, website: str = "", link_check: dict
 
     issues.sort(key=_issue_rank)
     return issues
+
+
+# Engagement (likes + comments per post, as a share of followers) falls as an
+# account grows, and published benchmarks disagree widely (roughly 0.45% to
+# 2.5% for "average"). So: coarse size bands, and a flag only when the rate is
+# far below even the cautious end for the band. These floors are ours, never
+# stated as a benchmark in any copy.
+_ENGAGEMENT_BANDS = (
+    (1_000, "under 1k", 1.0),
+    (10_000, "1k to 10k", 0.5),
+    (50_000, "10k to 50k", 0.3),
+    (None, "50k plus", 0.15),
+)
+
+
+def engagement_band(followers: int) -> tuple[str, float]:
+    """(band name, the rate below which engagement is clearly low)."""
+    for upper, name, floor in _ENGAGEMENT_BANDS:
+        if upper is None or followers < upper:
+            return name, floor
+    return _ENGAGEMENT_BANDS[-1][1], _ENGAGEMENT_BANDS[-1][2]
+
+
+def _avg(values):
+    return sum(values) / len(values) if values else 0.0
+
+
+def _engagement_issues(p: SocialProfile, posts: list[dict]) -> list[SocialIssue]:
+    out: list[SocialIssue] = []
+    _, floor = engagement_band(p.followers)
+    low = p.followers > 500 and 0 < p.avg_engagement_rate < floor
+    if low:
+        out.append(SocialIssue(
+            "medium", "Low engagement",
+            "Very few followers like or comment on the posts, well below what is typical for an account of this size.",
+        ))
+
+    counted = [x for x in posts if x.get("likes") is not None and x.get("comments") is not None]
+    if not low and p.followers > 1000 and len(counted) >= 3 and len(counted) == len(posts):
+        if _avg([x["comments"] for x in counted]) < 1:
+            out.append(SocialIssue(
+                "low", "Very few comments",
+                "The posts get almost no comments, so there is little conversation happening on the page.",
+            ))
+
+    if p.formats_known and len(counted) == len(posts):
+        def eng(kind):
+            vals = [x["likes"] + x["comments"] for x in counted if x.get("type") == kind]
+            return (_avg(vals), len(vals))
+        img_avg, img_n = eng("image")
+        better = []
+        if img_n >= 3:
+            for kind, word in (("video", "video"), ("carousel", "carousel")):
+                avg, n = eng(kind)
+                if n >= 3 and avg > 0 and avg >= 1.5 * img_avg:
+                    better.append(word)
+        if better:
+            which = " and ".join(better)
+            out.append(SocialIssue(
+                "low", f"Image posts underperform {which} posts on this account",
+                f"On this account the {which} posts get clearly more likes and comments than the single image posts, "
+                f"yet single images are still part of the mix.",
+            ))
+    return out
 
 
 def _caption_issues(posts: list[dict]) -> list[SocialIssue]:
