@@ -36,6 +36,14 @@ def test_merge_keeps_every_page_in_order_with_sizes_and_title():
     assert r.metadata.title == "Acme website and Instagram audit"
 
 
+def test_page_count_reads_pages_and_refuses_broken_or_empty():
+    assert combine.page_count(tiny_pdf(4)) == 4
+    with pytest.raises(combine.CombineError):
+        combine.page_count(b"not a pdf at all")
+    with pytest.raises(combine.CombineError):
+        combine.page_count(tiny_pdf(0))
+
+
 def test_merge_refuses_a_broken_part():
     with pytest.raises(combine.CombineError):
         combine.merge_pdfs([tiny_pdf(1), b"not a pdf at all"], title="x")
@@ -135,6 +143,20 @@ def test_combined_pdf_is_the_website_report_then_the_instagram_audit(env):
     html = env["social_html"][0]
     assert "Instagram audit for Acme Co" in html
     assert_no_internal_material(html)
+
+
+def test_instagram_page_numbers_continue_from_the_website_pages(env):
+    import re
+    c = env["client"]
+    with c:
+        job_id = _report_job(env)
+        assert c.post("/api/combined-pdf", json=combined_body(job_id)).status_code == 200
+    html = env["social_html"][0]
+    numbers = [int(n) for n in re.findall(r'class="footer"><span>[^<]*</span><span>(\d+)</span>', html)]
+    # the website part has WEBSITE_PAGES pages, so the Instagram cover is the next one
+    # and the first numbered Instagram page is the one after it
+    assert numbers[0] == WEBSITE_PAGES + 2
+    assert numbers == list(range(WEBSITE_PAGES + 2, WEBSITE_PAGES + 2 + len(numbers)))
 
 
 def test_requires_the_api_key(env, monkeypatch):

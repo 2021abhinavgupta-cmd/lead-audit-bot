@@ -11,6 +11,17 @@ class CombineError(Exception):
     """A part could not be read, or had no pages. Nothing partial is returned."""
 
 
+def page_count(pdf: bytes) -> int:
+    """Pages in a PDF; CombineError when it is unreadable or empty."""
+    try:
+        n = len(PdfReader(io.BytesIO(pdf)).pages)
+    except Exception as ex:
+        raise CombineError(f"not a readable PDF: {ex}") from ex
+    if not n:
+        raise CombineError("the PDF has no pages")
+    return n
+
+
 def merge_pdfs(parts: list[bytes], *, title: str) -> bytes:
     writer = PdfWriter()
     for n, part in enumerate(parts, 1):

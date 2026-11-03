@@ -2995,11 +2995,18 @@ async def combined_pdf(
         raise HTTPException(status_code=404, detail="The website report file is gone. Make it again.")
     with open(path, "rb") as fh:
         website_pdf = fh.read()
+    # the Instagram pages number on from the website part's last page
+    try:
+        website_pages = await asyncio.to_thread(reporting_combine.page_count, website_pdf)
+    except reporting_combine.CombineError as ex:
+        print(f"[CombinedPdf] website PDF unreadable: {ex}")
+        raise HTTPException(status_code=502, detail="The two reports could not be combined. No PDF was made.")
 
     page = reporting_social_pdf.build_long_html(
         data,
         sender_name=os.getenv("YOUR_NAME", "Kshitij Gupta"),
         sender_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
+        start_page=website_pages + 1,
     )
     try:
         social = await reporting_report.render_pdf(page, margin_mm=reporting_social_pdf.LONG_MARGIN_MM)
