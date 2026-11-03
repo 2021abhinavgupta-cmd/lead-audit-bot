@@ -424,8 +424,8 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
 
     p.uses_video = any(_is_video_node(n) for n in nodes)
     p.sample_captions = captions
-    if nodes and len(taken) != len(nodes):
-        # some posts without a timestamp: do not guess the cadence
+    if (nodes and len(taken) != len(nodes)) or (not nodes and p.posts_count > 0):
+        # posts exist but their dates were not all returned: do not guess
         p.activity_known = False
         p.note = "Posting dates could not be read for every recent post, so posting activity is not judged."
         return "ok", p
@@ -437,3 +437,219 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
         count = len(nodes)
         p.avg_engagement_rate = round((total_likes / count + total_comments / count) / followers * 100, 2)
     return "ok", p
+
+
+# ---------------------------------------------------------------------------
+# fetch layer (Playwright). Not exercised by tests; read_instagram takes the
+# fetchers as parameters so tests pass fakes.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PublicPage:
+    status: int
+    url: str     # final URL after redirects (a login wall shows up here)
+    html: str
+
+
+@dataclass
+class SessionResult:
+    kind: str            # "no_session" | "blocked" | "response"
+    status: int = 0
+    payload: object = None
+    note: str = ""
+
+
+_LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
+_VIEWPORT = {"width": 1280, "height": 900}
+
+
+def browser_identity(playwright) -> dict:
+    """Context options shared by the login script, the session reader and
+    the public reader, so the logged-in session is always replayed from the
+    same browser fingerprint. The user agent is Playwright's own "Desktop
+    Chrome" descriptor, which matches the bundled Chromium's real version
+    (a hand-written UA would disagree with the sec-ch-ua headers)."""
+    return {
+        "user_agent": playwright.devices["Desktop Chrome"]["user_agent"],
+        "viewport": _VIEWPORT,
+        "locale": "en-US",
+        "timezone_id": "Asia/Kolkata",
+    }
+
+
+def session_dir() -> str:
+    d = getattr(config, "IG_SESSION_DIR", "") or os.path.join("data", "ig_session")
+    return d if os.path.isabs(d) else os.path.join(BASE_DIR, d)
+
+
+def _block_heavy(route):
+    if route.request.resource_type in ("image", "media", "font"):
+        return route.abort()
+    return route.continue_()
+
+
+def _playwright_public_fetch(handle: str) -> PublicPage:
+    """One logged-out load of the profile in a short-lived browser. Images,
+    video and fonts are blocked (the data is all in the HTML)."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        try:
+            ctx = browser.new_context(service_workers="block", **browser_identity(p))
+            ctx.route("**/*", _block_heavy)
+            page = ctx.new_page()
+            resp = page.goto(profile_url(handle), wait_until="domcontentloaded", timeout=30_000)
+            try:
+                page.wait_for_selector('meta[property="og:description"]', state="attached", timeout=5_000)
+            except Exception:  # noqa: BLE001  (a missing meta is classified by the parser)
+                pass
+            return PublicPage(resp.status if resp else 0, page.url, page.content())
+        finally:
+            browser.close()
+
+
+def _make_session_fetch(user_data_dir: str):
+    def _playwright_session_fetch(handle: str, gate) -> SessionResult:
+        """web_profile_info through the persistent logged-in context (same
+        cookies and fingerprint as the hand login). `gate` is the throttle,
+        called right before the one network request."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir, headless=True, args=_LAUNCH_ARGS, **browser_identity(p))
+            try:
+                if not has_session_cookie(ctx.cookies("https://www.instagram.com")):
+                    return SessionResult("no_session")
+                note = gate()
+                if note:
+                    return SessionResult("blocked", note=note)
+                resp = ctx.request.get(
+                    f"https://www.instagram.com/api/v1/users/web_profile_info/?username={handle}",
+                    headers={
+                        "x-ig-app-id": IG_APP_ID,
+                        "x-requested-with": "XMLHttpRequest",
+                        "referer": profile_url(handle),
+                        "accept": "*/*",
+                    },
+                    timeout=20_000,
+                    max_redirects=0,
+                )
+                text = resp.text()
+                try:
+                    payload = json.loads(text)
+                except ValueError:
+                    payload = None
+                status = resp.status
+                if 300 <= status < 400:
+                    # a redirect to /accounts/login or /challenge means a dead session
+                    status = 401
+                return SessionResult("response", status=status, payload=payload)
+            finally:
+                ctx.close()
+
+    return _playwright_session_fetch
+
+
+def _default_session_fetch(user_data_dir: str):
+    """The real session fetcher, or None when no login was ever saved."""
+    try:
+        if os.path.isdir(user_data_dir) and os.listdir(user_data_dir):
+            return _make_session_fetch(user_data_dir)
+    except OSError:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# entry point
+# ---------------------------------------------------------------------------
+
+_DEFAULT = object()
+_READ_LOCK = threading.Lock()   # one Instagram browser at a time
+
+
+def _join(*notes) -> str:
+    return " ".join(n for n in notes if n)
+
+
+def read_instagram(handle: str, *, public_fetch=None, session_fetch=_DEFAULT, throttle=None,
+                   now: datetime | None = None) -> SocialProfile:
+    """Read one Instagram profile: spare session first when one is saved,
+    else (or when it is dead) the public logged-out page.
+
+    Returns a SocialProfile, analyzed=False with a note for every expected
+    failure (invalid name, private, not found, login wall, 429, cooldown,
+    hourly cap, browser timeout). Only a genuine bug raises, so the adapter
+    can fall back to the legacy scraper."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    h = normalize_handle(handle)
+    if not h:
+        raw = (handle or "").strip()
+        return unanalyzed("instagram", raw, "https://www.instagram.com/", NOTE_INVALID)
+    url = profile_url(h)
+    th = throttle or _THROTTLE
+    now = now or datetime.now(timezone.utc)
+    public_fetch = public_fetch or _playwright_public_fetch
+    if session_fetch is _DEFAULT:
+        session_fetch = _default_session_fetch(session_dir())
+
+    with _READ_LOCK:
+        note = th.blocked_note()
+        if note:
+            return unanalyzed("instagram", h, url, note)
+
+        session_note = ""
+        if session_fetch is not None:
+            if not th.session_usable():
+                session_note = NOTE_RELOGIN
+            else:
+                res = None
+                try:
+                    res = session_fetch(h, th.acquire)
+                except PlaywrightError as e:
+                    print(f"[InstagramWeb] session browser failed: {e}")
+                    session_note = ("The spare Instagram session could not be opened, "
+                                    "showing the public view instead.")
+                if res is not None:
+                    if res.kind == "blocked":
+                        return unanalyzed("instagram", h, url, res.note)
+                    if res.kind == "no_session":
+                        session_note = NOTE_RELOGIN
+                    elif res.kind == "response":
+                        verdict = classify_session_response(res.status, res.payload)
+                        if verdict == "ok":
+                            return parse_web_profile_info(res.payload, h, now)[1]
+                        if verdict == "not_found":
+                            return unanalyzed("instagram", h, url, NOTE_NOT_FOUND)
+                        if verdict == "rate_limited":
+                            th.trip()
+                            return unanalyzed("instagram", h, url, th.blocked_note() or "")
+                        if verdict == "session_dead":
+                            th.mark_session_dead()
+                            session_note = NOTE_RELOGIN
+                        else:
+                            session_note = (f"The spare Instagram session could not read this profile "
+                                            f"(HTTP {res.status}), showing the public view instead.")
+
+        note = th.acquire()
+        if note:
+            return unanalyzed("instagram", h, url, _join(note, session_note))
+        try:
+            page = public_fetch(h)
+        except PlaywrightError as e:
+            print(f"[InstagramWeb] public load failed: {e}")
+            return unanalyzed("instagram", h, url, _join(
+                "Instagram did not load (timeout or browser error), so the profile could not be read.",
+                session_note))
+
+        if page.status == 429:
+            th.trip()
+            return unanalyzed("instagram", h, url, _join(th.blocked_note(), session_note))
+        kind, profile = parse_public_page(page.html, h, now, final_url=page.url)
+        if kind == "login_wall":
+            th.trip()
+        profile.note = _join(profile.note, session_note)
+        return profile
