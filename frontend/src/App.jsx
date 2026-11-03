@@ -2577,6 +2577,7 @@ function App() {
     linkedin: { label: 'LinkedIn', color: '#0a66c2' },
   };
   const SEVERITY_COLOR = { high: '#ef4444', medium: '#f59e0b', low: '#64748b' };
+  const LEAD_SCORE_COLOR = { strong: '#10b981', maybe: '#f59e0b', weak: '#94a3b8' };
 
   const fetchSocialDrafts = async () => {
     try {
@@ -2777,7 +2778,22 @@ function App() {
         const meta = PLATFORM_META[platform] || { label: platform, color: '#64748b' };
         return (
           <div key={platform} style={{ marginBottom: '18px' }}>
-            <div style={{ fontWeight: 700, color: meta.color, marginBottom: '6px' }}>{meta.label}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 700, color: meta.color }}>{meta.label}</span>
+              {data.lead_score && (
+                <span title={(data.lead_score.reasons || []).join('\n')} style={{
+                  fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '999px',
+                  color: '#fff', background: LEAD_SCORE_COLOR[data.lead_score.label] || '#64748b',
+                }}>
+                  {data.lead_score.label} lead · {data.lead_score.score}
+                </span>
+              )}
+            </div>
+            {data.lead_score && (data.lead_score.reasons || []).length > 0 && (
+              <ul style={{ margin: '0 0 6px', paddingLeft: '18px', color: '#64748b', fontSize: '12px' }}>
+                {data.lead_score.reasons.map((r, k) => <li key={k}>{r}</li>)}
+              </ul>
+            )}
             {!data.profile && <p style={{ color: '#94a3b8', fontSize: '13px' }}>{data.note || 'Could not analyze this profile.'}</p>}
             {data.profile && (
               <>

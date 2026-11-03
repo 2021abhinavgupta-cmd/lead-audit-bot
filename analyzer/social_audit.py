@@ -420,19 +420,97 @@ def _caption_issues(posts: list[dict]) -> list[SocialIssue]:
 
 
 # ---------------------------------------------------------------------------
+# Lead score
+# ---------------------------------------------------------------------------
+
+_ISSUE_POINTS = {"high": 15, "medium": 10, "low": 5}
+
+
+def lead_score(profile: SocialProfile | None, issues: list[SocialIssue]) -> dict:
+    """How worth pitching this profile is, from known data only:
+    {"score": 0..100, "label": "strong" | "maybe" | "weak", "reasons": [...]}.
+
+    Stronger: posting recently AND a real audience AND fixable issues.
+    Weak: abandoned, private, or not analyzed. Unknown posting activity caps
+    the lead at "maybe" (we cannot say anyone is running the account).
+    Deterministic; reasons are plain language for the Social tab, never fed
+    to the outreach model."""
+    if profile is None or not profile.analyzed:
+        note = (getattr(profile, "note", "") or "").lower()
+        if "private" in note:
+            reason = "The account is private, so there is nothing visible to pitch on."
+        else:
+            reason = "The profile could not be read, so there is nothing to pitch on yet."
+        return {"score": 0, "label": "weak", "reasons": [reason]}
+
+    p = profile
+    score = 0
+    reasons: list[str] = []
+    cap = 100
+    age = p.last_post_age_days
+
+    if p.activity_known and (age is None or age > 90):
+        reasons.append("No posts in over three months, so the account looks abandoned." if age is not None
+                       else "There are no posts to look at, so the account looks unused.")
+        cap = 20
+    elif p.activity_known and age <= 30:
+        score += 35
+        reasons.append("Posted within the last month, so someone is still running the account.")
+    elif p.activity_known:
+        score += 10
+        reasons.append("Posting has gone quiet recently but the account is not abandoned.")
+    else:
+        score += 15
+        reasons.append("Posting activity could not be read, so it is unclear whether anyone runs the account.")
+        cap = 69
+
+    if p.followers >= 500:
+        score += 30
+        reasons.append(f"Has a real audience of {p.followers:,} followers.")
+    elif p.followers >= 100:
+        score += 10
+        reasons.append(f"Small audience of {p.followers:,} followers.")
+    else:
+        reasons.append(f"Very small audience of {p.followers:,} followers.")
+
+    if issues:
+        top = sorted(issues, key=_issue_rank)[0]
+        score += min(35, sum(_ISSUE_POINTS.get(i.severity, 0) for i in issues))
+        n = len(issues)
+        reasons.append(f"{n} fixable issue{'s' if n != 1 else ''} found, the biggest being {top.label.lower()}.")
+    else:
+        reasons.append("No clear issues found, so there is little to pitch.")
+
+    score = max(0, min(score, cap, 100))
+    label = "strong" if score >= 70 else "maybe" if score >= 40 else "weak"
+    return {"score": score, "label": label, "reasons": reasons}
+
+
+# ---------------------------------------------------------------------------
 # Outreach copy generation
 # ---------------------------------------------------------------------------
 
+# Instructions are spelled out in words, so every digit in the prompt comes
+# from the business name, the handle or the issue list (tested).
 _CHANNEL_SHAPE = {
-    "email": "Write a cold outreach EMAIL. Return a subject line and a body of 60 to 110 words. "
+    "email": "Write a cold outreach EMAIL. Return a subject line and a body of sixty to one hundred and ten words. "
              "The subject must be specific and hint at the problem, never a bland label.",
-    "dm": "Write a short Instagram DM. No subject. 2 to 3 sentences, casual, one issue, one soft ask.",
-    "whatsapp": "Write a short WhatsApp message. No subject. 2 to 3 sentences, casual and friendly, light on emoji.",
+    "dm": "Write a short Instagram DM. No subject. Two or three sentences, casual, one issue, one soft ask.",
+    "whatsapp": "Write a short WhatsApp message. No subject. Two or three sentences, casual and friendly, light on emoji.",
 }
 
 
 def _build_outreach_prompt(company, profile, issues, channel, your_name):
-    issue_lines = "\n".join(f"- {i.label}: {i.detail}" for i in issues) or "- (no specific issues found)"
+    # Strongest PROVEN issue first: severity, then how easily the owner can
+    # verify it (a broken link before a judgement call). Stable for ties.
+    ordered = sorted(issues, key=_issue_rank)
+    if ordered:
+        top, rest = ordered[0], ordered[1:]
+        issue_lines = f"TOP ISSUE (open with this one):\n- {top.label}: {top.detail}"
+        if rest:
+            issue_lines += "\nOTHER ISSUES:\n" + "\n".join(f"- {i.label}: {i.detail}" for i in rest)
+    else:
+        issue_lines = "- (no specific issues found)"
     shape = _CHANNEL_SHAPE.get(channel, _CHANNEL_SHAPE["email"])
     return (
         f"You write outreach for MMGA, a small agency that fixes social media presence for local businesses.\n\n"
@@ -443,7 +521,7 @@ def _build_outreach_prompt(company, profile, issues, channel, your_name):
         f"{issue_lines}\n\n"
         f"{shape}\n\n"
         f"Rules:\n"
-        f"- Lead with the single most important issue stated as a business problem, not a compliment or pleasantry.\n"
+        f"- Open with the top issue stated as a business problem, not a compliment or pleasantry.\n"
         f"- Plain language a busy owner understands. No marketing jargon.\n"
         f"- Do NOT use hyphens or dashes of any kind anywhere in your output.\n"
         f"- Do NOT use generic AI phrases like 'I noticed', 'In today's competitive landscape', 'I hope this finds you well'.\n"

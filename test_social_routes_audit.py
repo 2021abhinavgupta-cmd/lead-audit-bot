@@ -57,6 +57,23 @@ def test_audit_checks_the_bio_link_and_passes_the_website(monkeypatch):
     assert checked == ["https://acme.example/shop"]
     assert res["issues"][0]["label"] == "Link in bio is broken"
     assert res["link_check"]["verdict"] == "broken"
+    assert res["lead_score"]["label"] in ("strong", "maybe", "weak")
+    assert res["lead_score"]["reasons"]
+
+
+def test_unanalyzed_and_missing_profiles_get_a_weak_lead_score(monkeypatch):
+    from scrapers.social.base import unanalyzed
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    monkeypatch.setitem(app_module._SOCIAL_ADAPTERS, "instagram",
+                        lambda handle: unanalyzed("instagram", "x", "u", "This Instagram account is private."))
+    monkeypatch.setitem(app_module._SOCIAL_ADAPTERS, "facebook", lambda handle: None)
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        r = client.post("/api/social/audit", json={
+            "company": "Acme", "handles": {"instagram": "x", "facebook": "https://facebook.com/x"}})
+        assert r.status_code == 200, r.text
+        results = r.json()["results"]
+    assert results["instagram"]["lead_score"]["label"] == "weak"
+    assert results["facebook"]["lead_score"]["label"] == "weak"
 
 
 def test_audit_without_a_bio_link_fetches_nothing(monkeypatch):

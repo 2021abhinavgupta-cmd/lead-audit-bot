@@ -36,7 +36,7 @@ from analyzer.visuals import (
 )
 from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
-from analyzer.social_audit import audit_profile, generate_social_outreach
+from analyzer.social_audit import audit_profile, generate_social_outreach, lead_score
 from analyzer.social_link import check_bio_link
 from scrapers.social.discover import find_social_handles
 from scrapers.social.instagram import fetch_instagram
@@ -2237,12 +2237,14 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
             profile = None
 
         if profile is None:
-            results[platform] = {"profile": None, "issues": [], "outreach": {}, "note": "could not analyze this profile"}
+            results[platform] = {"profile": None, "issues": [], "outreach": {}, "note": "could not analyze this profile",
+                                 "lead_score": lead_score(None, [])}
             continue
         if not getattr(profile, "analyzed", True):
             results[platform] = {
                 "profile": _dataclass_asdict(profile), "issues": [], "outreach": {},
                 "note": profile.note or "could not analyze this profile",
+                "lead_score": lead_score(profile, []),
             }
             continue
 
@@ -2277,6 +2279,7 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
         results[platform] = {
             "profile": _dataclass_asdict(profile), "issues": issue_dicts, "outreach": outreach,
             "link_check": link_check,
+            "lead_score": lead_score(profile, issues),
         }
 
     return {"results": results}
