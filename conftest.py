@@ -28,3 +28,23 @@ def _no_live_instagram(monkeypatch, tmp_path):
     monkeypatch.setattr(instagram_web, "_playwright_public_fetch", _blocked)
     # fresh, non-sleeping throttle per test (the module one is process-wide)
     monkeypatch.setattr(instagram_web, "_THROTTLE", instagram_web.InstagramThrottle(min_interval=0))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_bio_link_fetch(monkeypatch):
+    # The social audit fetches a profile's bio link. No test may touch the
+    # network for it: the default getter fails like a dead connection and the
+    # "is our network up" probe says no, so check_bio_link returns "unknown"
+    # (never "broken") unless a test injects its own fakes. The cache is fresh
+    # per test.
+    import httpx
+    from analyzer import social_link
+
+    def _blocked(url):
+        raise httpx.ConnectError("live bio link fetch is disabled in tests")
+
+    monkeypatch.setattr(social_link, "_default_get", _blocked)
+    monkeypatch.setattr(social_link, "_default_network_ok", lambda: False)
+    monkeypatch.setattr(social_link, "_default_hop_check", lambda url: "ok")
+    monkeypatch.setattr(social_link, "_CACHE", {})
+    monkeypatch.setattr(social_link, "_RETRY_PAUSE", 0)
