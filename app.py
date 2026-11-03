@@ -37,6 +37,7 @@ from analyzer.visuals import (
 from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
 from analyzer.social_audit import audit_profile, generate_social_outreach
+from analyzer.social_link import check_bio_link
 from scrapers.social.discover import find_social_handles
 from scrapers.social.instagram import fetch_instagram
 from scrapers.social.youtube import fetch_youtube
@@ -2061,6 +2062,7 @@ class SocialSearchIn(BaseModel):
 class SocialAuditIn(BaseModel):
     company: str
     handles: dict            # {"instagram": url, "youtube": url, ...}
+    website: str = ""        # the business's own site, when known (bio link check)
     async_mode: bool = False
 
 
@@ -2244,7 +2246,18 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
             }
             continue
 
-        issues = audit_profile(profile)
+        link_check = None
+        link_url = getattr(profile, "link_url", "") or ""
+        if link_url and platform in ("instagram", "facebook"):
+            if progress_key:
+                _social_progress_set(_social_audit_progress, progress_key, f"Checking {platform} bio link")
+            try:
+                link_check = await asyncio.to_thread(check_bio_link, link_url)
+            except Exception as e:  # noqa: BLE001  (never claim broken on our own failure)
+                print(f"[SocialAudit] bio link check failed: {e}")
+                link_check = None
+
+        issues = audit_profile(profile, website=req.website or "", link_check=link_check)
         issue_dicts = [_dataclass_asdict(i) for i in issues]
         outreach = {}
         total_cost = 0.0
@@ -2261,7 +2274,10 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
                 db.log_cost, "Social Outreach", total_cost,
                 description=f"Social outreach for {req.company} ({platform})",
             )
-        results[platform] = {"profile": _dataclass_asdict(profile), "issues": issue_dicts, "outreach": outreach}
+        results[platform] = {
+            "profile": _dataclass_asdict(profile), "issues": issue_dicts, "outreach": outreach,
+            "link_check": link_check,
+        }
 
     return {"results": results}
 

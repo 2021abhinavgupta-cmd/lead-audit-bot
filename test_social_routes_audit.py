@@ -30,6 +30,47 @@ def test_audit_runs_instagram_and_returns_issues_and_outreach(monkeypatch):
         assert res["outreach"]["email"]["subject"] == "S"
 
 
+def test_audit_checks_the_bio_link_and_passes_the_website(monkeypatch):
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    profile = SocialProfile(
+        platform="instagram", handle="acme", url="https://instagram.com/acme",
+        followers=3000, bio="Handmade candles from our Pune studio. DM to order.",
+        has_link_in_bio=True, link_url="https://acme.example/shop",
+    )
+    monkeypatch.setitem(app_module._SOCIAL_ADAPTERS, "instagram", lambda handle: profile)
+    checked = []
+
+    def fake_check(url):
+        checked.append(url)
+        return {"verdict": "broken", "status": 404, "final_url": url}
+    monkeypatch.setattr(app_module, "check_bio_link", fake_check)
+    monkeypatch.setattr(app_module, "generate_social_outreach",
+                        lambda *a, **k: {"subject": "", "body": "b", "cost": 0.0})
+
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        r = client.post("/api/social/audit", json={
+            "company": "Acme", "website": "https://acme.example",
+            "handles": {"instagram": "https://instagram.com/acme"},
+        })
+        assert r.status_code == 200, r.text
+        res = r.json()["results"]["instagram"]
+    assert checked == ["https://acme.example/shop"]
+    assert res["issues"][0]["label"] == "Link in bio is broken"
+    assert res["link_check"]["verdict"] == "broken"
+
+
+def test_audit_without_a_bio_link_fetches_nothing(monkeypatch):
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    profile = SocialProfile(platform="instagram", handle="acme", url="u", followers=10, bio="candles")
+    monkeypatch.setitem(app_module._SOCIAL_ADAPTERS, "instagram", lambda handle: profile)
+    monkeypatch.setattr(app_module, "check_bio_link", lambda url: (_ for _ in ()).throw(AssertionError("fetched")))
+    monkeypatch.setattr(app_module, "generate_social_outreach",
+                        lambda *a, **k: {"subject": "", "body": "b", "cost": 0.0})
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        r = client.post("/api/social/audit", json={"company": "Acme", "handles": {"instagram": "acme"}})
+        assert r.status_code == 200, r.text
+
+
 def test_adapter_returning_none_is_a_note_not_a_crash(monkeypatch):
     monkeypatch.setattr(app_module.config, "API_KEY", None)
     monkeypatch.setitem(app_module._SOCIAL_ADAPTERS, "facebook", lambda handle: None)

@@ -15,9 +15,23 @@ import json
 import re as _re
 from dataclasses import dataclass
 
+from analyzer import social_link
 from scrapers.social.base import SocialProfile
 
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+# Tie break inside one severity: issues a business owner can check for
+# themselves in ten seconds (tap the link, look at the dates) come first, so
+# the outreach leads with the most provable problem.
+_PROOF_RANK = {
+    "Link in bio is broken": 0,
+    "Inactive account": 1,
+    "No link in the bio": 2,
+    "No call to action in the bio": 3,
+    "Uneven posting schedule": 4,
+    "Not using short video": 5,
+}
+_PROOF_DEFAULT = 10
 
 
 @dataclass
@@ -27,15 +41,178 @@ class SocialIssue:
     detail: str
 
 
-def audit_profile(profile: SocialProfile) -> list[SocialIssue]:
+def _issue_rank(issue: SocialIssue) -> tuple[int, int]:
+    return _SEVERITY_RANK.get(issue.severity, 3), _PROOF_RANK.get(issue.label, _PROOF_DEFAULT)
+
+
+# ---------------------------------------------------------------------------
+# word lists (lower case, matched on word boundaries)
+# ---------------------------------------------------------------------------
+
+def _word_re(words) -> "_re.Pattern":
+    alts = sorted((_re.escape(w) for w in words), key=len, reverse=True)
+    return _re.compile(r"(?<![a-z0-9])(?:" + "|".join(alts) + r")(?![a-z0-9])", _re.I)
+
+
+_BIO_CTA = _word_re((
+    "book", "booking", "bookings", "book now", "call", "call us", "calls", "dm", "dms", "dm us",
+    "message", "message us", "msg", "inbox", "text us", "order", "orders", "ordering", "pre order",
+    "whatsapp", "whats app", "wa", "email", "e mail", "mail", "mail us", "contact", "contact us",
+    "enquire", "enquiry", "enquiries", "inquire", "inquiry", "inquiries", "appointment", "appointments",
+    "reserve", "reservation", "reservations", "shop", "shop now", "buy", "visit", "click", "tap",
+    "link", "link below", "below", "get in touch", "reach us", "reach out", "write to", "hire",
+    "work with us", "sign up", "register", "join", "download", "quote", "subscribe", "apply",
+))
+_EMAIL_RE = _re.compile(r"[\w.+]+@[\w-]+\.[\w.-]+")
+_PHONE_RE = _re.compile(r"\+?\d[\d ()]{8,}\d")
+_CTA_EMOJI = ("\U0001F447", "⬇", "\U0001F4DE", "☎", "\U0001F4E9", "\U0001F4E7", "✉",
+              "\U0001F4F2", "\U0001F6D2", "\U0001F449")
+
+_LOCATION_WORDS = _word_re((
+    "based in", "located", "location", "locations", "address", "hq", "headquarters", "near",
+    "visit us", "outlet", "outlets", "branch", "branches", "store", "stores", "worldwide",
+    "pan india", "all india", "across india", "india", "online", "delivery", "delivering",
+    "we deliver", "ships", "shipping", "nationwide", "city",
+    "mumbai", "delhi", "new delhi", "bangalore", "bengaluru", "hyderabad", "chennai", "kolkata",
+    "pune", "ahmedabad", "surat", "jaipur", "lucknow", "kanpur", "nagpur", "indore", "bhopal",
+    "goa", "chandigarh", "kochi", "gurgaon", "gurugram", "noida", "thane", "navi mumbai",
+    "vadodara", "coimbatore", "mysore", "mysuru", "nashik", "ludhiana", "dubai", "london",
+    "new york", "singapore",
+))
+_LOCATION_EMOJI = ("\U0001F4CD", "\U0001F30D", "\U0001F30E", "\U0001F30F", "\U0001F3E0", "\U0001F3EA",
+                   "\U0001F3E2", "\U0001F5FA")
+# "Bakery in Pune", "Studio at Bandra": a capitalised place after in / at.
+_IN_PLACE_RE = _re.compile(r"\b(?:in|at|from)\s+[A-Z][a-z]{2,}")
+_PINCODE_RE = _re.compile(r"\b\d{6}\b")
+
+_SERVICE_WORDS = _word_re((
+    "we", "our", "us", "make", "makes", "made", "making", "sell", "selling", "offer", "offering",
+    "provide", "providing", "design", "designs", "designer", "studio", "shop", "store", "boutique",
+    "salon", "spa", "clinic", "cafe", "café", "restaurant", "bakery", "bakes", "bakehouse",
+    "kitchen", "agency", "service", "services", "brand", "handmade", "homemade", "products",
+    "consulting", "consultant", "coach", "coaching", "classes", "academy", "school", "institute",
+    "gym", "fitness", "yoga", "photography", "photographer", "makeup", "artist", "catering",
+    "caterer", "events", "wedding", "weddings", "interior", "interiors", "realty", "real estate",
+    "jewellery", "jewelry", "fashion", "clothing", "apparel", "wear", "skincare", "dental",
+    "dentist", "doctor", "dr", "hospital", "pharmacy", "repair", "repairs", "travel", "tours",
+    "hotel", "homestay", "resort", "food", "cakes", "coffee", "tea", "organic", "decor",
+    "furniture", "printing", "marketing", "software", "solutions", "official", "company",
+    "pvt", "ltd", "llp", "since", "founder", "founded", "est", "manufacturer", "manufacturing",
+    "wholesale", "retail", "supplier", "exporter", "delivery", "custom", "bespoke",
+))
+
+_CAPTION_CTA = _word_re((
+    "link in bio", "link", "dm", "dm us", "message", "message us", "book", "booking", "order",
+    "order now", "call", "whatsapp", "shop", "shop now", "buy", "visit", "comment", "comments",
+    "tag", "share", "save", "follow", "click", "tap", "swipe", "register", "sign up", "join",
+    "enquire", "enquiry", "inquire", "contact", "reach out", "email", "mail", "learn more",
+    "check out", "get yours", "grab", "try", "reply", "tell us", "let us know", "drop", "apply",
+    "subscribe", "download", "reserve", "hurry", "limited",
+))
+_HASHTAG_RE = _re.compile(r"#\w+")
+
+
+def _bio_has_cta(bio: str) -> bool:
+    return bool(_BIO_CTA.search(bio) or _EMAIL_RE.search(bio) or _PHONE_RE.search(bio)
+                or "wa.me" in bio.lower() or any(e in bio for e in _CTA_EMOJI))
+
+
+def _bio_says_where(bio: str) -> bool:
+    return bool(_LOCATION_WORDS.search(bio) or _IN_PLACE_RE.search(bio) or _PINCODE_RE.search(bio)
+                or any(e in bio for e in _LOCATION_EMOJI))
+
+
+def _bio_says_what(bio: str) -> bool:
+    return bool(_SERVICE_WORDS.search(bio))
+
+
+# ---------------------------------------------------------------------------
+# helpers over recent_posts
+# ---------------------------------------------------------------------------
+
+def _post_dates_in_order(posts: list[dict]) -> list[int] | None:
+    """Post timestamps with pinned posts left out, or None when any date is
+    missing. A pinned post sits at the top of the grid out of date order (up
+    to three), so a top post older than one below it is treated as pinned."""
+    ts = [x.get("ts") for x in posts]
+    if not ts or any(not isinstance(t, (int, float)) for t in ts):
+        return None
+    keep = []
+    for i, t in enumerate(ts):
+        if i < 3 and any(t < later for later in ts[i + 1:]):
+            continue
+        keep.append(t)
+    return keep
+
+
+def _uneven_posting(posts: list[dict]) -> str | None:
+    """'gap' when the largest gap between two posts is over 21 days,
+    'burst' when more than half the posts landed in one 7 day window of a
+    span of at least four weeks, else None."""
+    ts = _post_dates_in_order(posts)
+    if ts is None or len(ts) < 4:
+        return None
+    days = sorted(t / 86400 for t in ts)
+    if max(b - a for a, b in zip(days, days[1:])) > 21:
+        return "gap"
+    span = days[-1] - days[0]
+    if span >= 28:
+        most = max(sum(1 for d in days if start <= d < start + 7) for start in days)
+        if most > len(days) / 2:
+            return "burst"
+    return None
+
+
+def _link_issue(p: SocialProfile, website: str, link_check: dict | None) -> SocialIssue | None:
+    """At most one issue about where the bio link goes."""
+    if not p.has_link_in_bio or not p.link_url:
+        return None
+    lc = link_check or {}
+    if lc.get("verdict") == "broken":
+        return SocialIssue(
+            "high", "Link in bio is broken",
+            "The link in the bio does not open, so anyone who taps it to buy or book lands on an error instead.",
+        )
+    final = lc.get("final_url") if lc.get("verdict") == "ok" else ""
+    if social_link.is_link_aggregator(p.link_url) or (final and social_link.is_link_aggregator(final)):
+        return SocialIssue(
+            "low", "Link in bio is a link list page",
+            "The bio link opens a page of more links rather than the business's own site, "
+            "which adds one more tap before a visitor can buy or book.",
+        )
+    if not website:
+        return None
+    target = final or p.link_url
+    if not final and social_link.is_url_shortener(p.link_url):
+        return None   # a short link whose target we did not see
+    if social_link.is_whatsapp_link(target):
+        return None   # a deliberate contact route, not a wrong site
+    own = social_link.registered_domain(website)
+    if own and social_link.registered_domain(target) != own:
+        return SocialIssue(
+            "low", "Link in bio skips the website",
+            "The bio link points somewhere other than the business website, "
+            "so people coming from Instagram never land on the main site.",
+        )
+    return None
+
+
+def audit_profile(profile: SocialProfile, *, website: str = "", link_check: dict | None = None) -> list[SocialIssue]:
     """Ranked issues for a profile. Empty when the profile could not be
-    analyzed or when nothing is wrong."""
+    analyzed or when nothing is wrong.
+
+    website: the business's own site when known (enables the "bio link goes
+    elsewhere" check). link_check: social_link.check_bio_link's verdict for
+    the bio link, fetched by the caller (only "broken" yields the broken
+    link issue; None / "unknown" never does)."""
     if not profile.analyzed:
         return []
 
     issues: list[SocialIssue] = []
     p = profile
     plat = p.platform
+    posts = p.recent_posts or []
+    inactive = False
 
     # Activity checks only run when the adapter actually saw the posting
     # activity. On a header-only read (activity_known=False) the activity
@@ -63,11 +240,28 @@ def audit_profile(profile: SocialProfile) -> list[SocialIssue]:
                 "Very few of the followers like or comment, so the posts are barely being seen.",
             ))
 
-        if not p.uses_video:
+        if not inactive and _uneven_posting(posts):
+            issues.append(SocialIssue(
+                "medium", "Uneven posting schedule",
+                "Posts come in bursts with long quiet stretches in between, "
+                "so followers see the brand on and off rather than steadily.",
+            ))
+
+    # Short video: ONE issue. When the post types were read, judge from them
+    # (works on a public read without dates too); otherwise fall back to the
+    # adapter's uses_video, which is only meaningful when activity was seen.
+    if p.formats_known and len(posts) >= 3:
+        if not any(x.get("type") == "video" for x in posts):
             issues.append(SocialIssue(
                 "medium", "Not using short video",
-                "There are no reels or short videos, and that is the format the platform pushes hardest right now.",
+                "The recent posts are all photos with no reels or short videos, "
+                "and short video is the format the platform pushes hardest right now.",
             ))
+    elif not p.formats_known and p.activity_known and not p.uses_video:
+        issues.append(SocialIssue(
+            "medium", "Not using short video",
+            "There are no reels or short videos, and that is the format the platform pushes hardest right now.",
+        ))
 
     if plat in ("instagram", "facebook") and not p.has_link_in_bio:
         issues.append(SocialIssue(
@@ -75,11 +269,33 @@ def audit_profile(profile: SocialProfile) -> list[SocialIssue]:
             "There is no clickable link, so a visitor who wants to buy or book has nowhere to go.",
         ))
 
-    if len(p.bio.strip()) < 20:
+    link = _link_issue(p, website, link_check) if plat in ("instagram", "facebook") else None
+    if link:
+        issues.append(link)
+
+    bio = p.bio.strip()
+    if len(bio) < 20:
         issues.append(SocialIssue(
             "low", "Thin or empty bio",
             "The bio barely says what the business does or why someone should follow.",
         ))
+    elif not _bio_says_what(bio) and not _bio_says_where(bio):
+        # merged with the thin bio check: a short bio gets that one only
+        issues.append(SocialIssue(
+            "low", "Bio does not say what or where",
+            "The bio does not say what the business offers or where it is, "
+            "so a new visitor cannot tell at a glance whether it is for them.",
+        ))
+
+    if plat in ("instagram", "facebook") and not _bio_has_cta(bio):
+        issues.append(SocialIssue(
+            "medium", "No call to action in the bio",
+            "The bio never tells a visitor what to do next, such as book, call, order or send a message, "
+            "so interested people are left to work it out on their own.",
+        ))
+
+    if p.captions_known and len(posts) >= 3:
+        issues.extend(_caption_issues(posts))
 
     if plat == "instagram" and p.following > p.followers and p.followers < 2000:
         issues.append(SocialIssue(
@@ -95,8 +311,48 @@ def audit_profile(profile: SocialProfile) -> list[SocialIssue]:
             "There are only a few posts in total, so the page has little for a new visitor to look through.",
         ))
 
-    issues.sort(key=lambda i: _SEVERITY_RANK[i.severity])
+    if post_count_known and p.posts_count >= 50 and p.followers / p.posts_count < 8:
+        issues.append(SocialIssue(
+            "low", "Audience not growing with the posts",
+            "The account has been posting a lot without the audience growing with it, "
+            "so the effort going into the page is not turning into new followers.",
+        ))
+
+    issues.sort(key=_issue_rank)
     return issues
+
+
+def _caption_issues(posts: list[dict]) -> list[SocialIssue]:
+    """Caption checks over the recent posts (captions known, at least 3 posts)."""
+    out: list[SocialIssue] = []
+    captions = [(x.get("caption") or "").strip() for x in posts]
+    filled = [c for c in captions if c]
+    if len(captions) - len(filled) >= len(captions) / 2:
+        out.append(SocialIssue(
+            "low", "Many posts have no caption",
+            "Many of the recent posts go out with no caption, so nothing tells people what they are "
+            "looking at or what to do next.",
+        ))
+    if len(filled) >= 3:
+        if not any(_CAPTION_CTA.search(c) for c in filled):
+            out.append(SocialIssue(
+                "low", "Captions never ask for action",
+                "None of the recent captions ask people to do anything, like book, order, message or visit, "
+                "so a post that catches someone's eye gives them no next step.",
+            ))
+        tags = [len(_HASHTAG_RE.findall(c)) for c in filled]
+        if sum(tags) == 0:
+            out.append(SocialIssue(
+                "low", "No hashtags on recent posts",
+                "None of the recent posts use hashtags, so they miss one of the simple ways people "
+                "browsing a topic can come across them.",
+            ))
+        elif sum(tags) / len(filled) > 15:
+            out.append(SocialIssue(
+                "low", "Too many hashtags",
+                "The recent posts carry long walls of hashtags, which looks spammy and buries the message.",
+            ))
+    return out
 
 
 # ---------------------------------------------------------------------------

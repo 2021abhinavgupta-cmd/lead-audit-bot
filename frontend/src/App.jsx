@@ -2657,7 +2657,7 @@ function App() {
     setSocialBusinesses(prev => prev.map((b, i) => i === index ? { ...b, auditing: true } : b));
     try {
       const start = await axios.post(`${API_BASE}/api/social/audit`, {
-        company: biz.company, handles, async_mode: true,
+        company: biz.company, handles, website: biz.website || '', async_mode: true,
       });
       const key = start.data.key;
       // eslint-disable-next-line no-constant-condition
