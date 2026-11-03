@@ -464,6 +464,7 @@ def parse_public_page(html: str, handle: str, now: datetime, final_url: str = ""
         activity_known=False,
         note=NOTE_PUBLIC_ONLY,
     )
+    p.followers_exact = isinstance(followers, int) and not isinstance(followers, bool)
     p.uses_video = any(_is_video_node(n) for n in nodes)
     p.sample_captions = [c[:200] for c in (_caption(n) for n in nodes) if c][:5]
     p.highlights_count = _public_highlights(user)
@@ -542,6 +543,8 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
         has_link_in_bio=bool(link),
         link_url=link,
     )
+
+    p.followers_exact = _count_or_none(user, "edge_followed_by") is not None
 
     hl = user.get("highlight_reel_count")
     if isinstance(hl, int) and not isinstance(hl, bool) and hl >= 0:

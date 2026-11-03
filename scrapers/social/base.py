@@ -60,6 +60,9 @@ class SocialProfile:
     engagement_known: bool = False
     # Story highlights shown on the profile, None when not read.
     highlights_count: int | None = None
+    # True only when `followers` is the exact count (Instagram JSON), not a
+    # rounded display value like "12K" or a rounded API figure.
+    followers_exact: bool = False
 
 
 def classify_frequency(posts_last_30_days: int) -> str:
