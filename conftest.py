@@ -26,3 +26,5 @@ def _no_live_instagram(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "IG_SESSION_DIR", str(tmp_path / "no_ig_session"), raising=False)
     monkeypatch.setattr(instagram_web, "_playwright_public_fetch", _blocked)
+    # fresh, non-sleeping throttle per test (the module one is process-wide)
+    monkeypatch.setattr(instagram_web, "_THROTTLE", instagram_web.InstagramThrottle(min_interval=0))
