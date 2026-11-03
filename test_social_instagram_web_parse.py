@@ -62,9 +62,22 @@ _MMGA_EDGES = [
 ]
 
 
+def _image(alt, caption="photo caption"):
+    return _node("XIGPolarisImageMedia", 1, "feed", alt, caption)
+
+
+_HIGHLIGHT_TITLES = ["Life@MMGA", "Websites", "Logos", "Hall of Fame", "Branding",
+                     "Campaigns", "Performance", "CGI", "Web 3", "Influencers"]
+
+
+def _highlights(titles=_HIGHLIGHT_TITLES, has_next_page=False):
+    return {"edges": [{"node": {"id": str(i), "title": t}} for i, t in enumerate(titles)],
+            "page_info": {"end_cursor": "c", "has_next_page": has_next_page}}
+
+
 def public_html(*, followers=559, following=42, og="560 Followers, 44 Following, 86 Posts",
                 is_private=False, edges=None, bio=BIO, bio_links=True, has_next_page=True,
-                with_profile_json=True):
+                with_profile_json=True, highlights="default"):
     user = {
         "pk": "60888964012", "username": "mmga.agency", "is_private": is_private,
         "biography": bio, "full_name": "MMGA",
@@ -75,6 +88,10 @@ def public_html(*, followers=559, following=42, og="560 Followers, 44 Following,
         "follower_count": followers, "following_count": following, "all_media_count": None,
         "id": "17841460840381120",
     }
+    if highlights == "default":
+        user["lox_highlights_connection"] = _highlights()
+    elif highlights is not None:
+        user["lox_highlights_connection"] = highlights
     timeline_user = {"pk": "60888964012", "id": "17841460840381120", "polaris_ordered_timeline_connection": {
         "edges": _MMGA_EDGES if edges is None else edges,
         "page_info": {"end_cursor": "c", "has_next_page": has_next_page}}}
@@ -208,6 +225,76 @@ def test_public_page_og_only_fallback():
     assert p.activity_known is False
 
 
+def test_public_page_recent_posts_types_captions_and_dates():
+    _, p = igw.parse_public_page(public_html(), "mmga.agency", NOW)
+    assert len(p.recent_posts) == 12
+    first = p.recent_posts[0]
+    assert first["type"] == "video"
+    assert first["caption"] == "MMGA in its softie era?"
+    # the logged out page never shows likes or comments: unknown, not zero
+    assert first["likes"] is None and first["comments"] is None
+    # the alt text date, as midnight UTC
+    assert first["ts"] == int(datetime(2026, 10, 27, tzinfo=timezone.utc).timestamp())
+    assert [x["type"] for x in p.recent_posts].count("carousel") == 5
+    assert p.captions_known is True
+    assert p.formats_known is True
+    assert p.engagement_known is False
+
+
+def test_public_page_image_post_type():
+    edges = [_image("Photo by MMGA on October 27, 2026."), _video("Video by MMGA on October 20, 2026.")]
+    _, p = igw.parse_public_page(public_html(edges=edges), "mmga.agency", NOW)
+    assert [x["type"] for x in p.recent_posts] == ["image", "video"]
+    assert p.formats_known is True
+
+
+def test_public_page_unknown_post_type_makes_formats_unknown():
+    edges = [_node("XIGPolarisSomethingNew", None, None, "Photo by MMGA on October 27, 2026."),
+             _video("Video by MMGA on October 20, 2026.")]
+    _, p = igw.parse_public_page(public_html(edges=edges), "mmga.agency", NOW)
+    assert p.recent_posts[0]["type"] == ""
+    assert p.formats_known is False
+
+
+def test_public_page_null_caption_is_an_empty_caption_but_missing_key_is_unknown():
+    edges = [_video("Video by MMGA on October 27, 2026.", caption=None),
+             _video("Video by MMGA on October 20, 2026.")]
+    _, p = igw.parse_public_page(public_html(edges=edges), "mmga.agency", NOW)
+    assert p.recent_posts[0]["caption"] == ""
+    assert p.captions_known is True
+
+    missing = _video("Video by MMGA on October 27, 2026.")
+    del missing["node"]["caption"]
+    _, p = igw.parse_public_page(public_html(edges=[missing]), "mmga.agency", NOW)
+    assert p.recent_posts[0]["caption"] is None
+    assert p.captions_known is False
+
+
+def test_public_page_undated_post_has_no_ts():
+    edges = [_video("A custom alt text"), _video("Video by MMGA on October 20, 2026.")]
+    _, p = igw.parse_public_page(public_html(edges=edges), "mmga.agency", NOW)
+    assert p.recent_posts[0]["ts"] is None
+    assert p.recent_posts[1]["ts"] is not None
+
+
+def test_public_page_no_posts_means_nothing_known_about_posts():
+    _, p = igw.parse_public_page(public_html(edges=[]), "mmga.agency", NOW)
+    assert p.recent_posts == []
+    assert p.captions_known is False and p.formats_known is False
+
+
+def test_public_page_highlights_count():
+    _, p = igw.parse_public_page(public_html(), "mmga.agency", NOW)
+    assert p.highlights_count == 10
+    _, p = igw.parse_public_page(public_html(highlights=_highlights([])), "mmga.agency", NOW)
+    assert p.highlights_count == 0
+    # more highlights than the page lists: the count is not known
+    _, p = igw.parse_public_page(public_html(highlights=_highlights(has_next_page=True)), "mmga.agency", NOW)
+    assert p.highlights_count is None
+    _, p = igw.parse_public_page(public_html(highlights=None), "mmga.agency", NOW)
+    assert p.highlights_count is None
+
+
 def test_public_page_no_link():
     _, p = igw.parse_public_page(public_html(bio_links=False), "mmga.agency", NOW)
     assert p.has_link_in_bio is False
@@ -265,8 +352,11 @@ def _ts(y, m, d):
     return int(datetime(y, m, d, 10, 0, tzinfo=timezone.utc).timestamp())
 
 
-def _media(ts, likes, comments, is_video=False, caption="cap", product_type="feed"):
+def _media(ts, likes, comments, is_video=False, caption="cap", product_type="feed", typename=None):
+    if typename is None:
+        typename = "GraphVideo" if is_video else "GraphImage"
     return {"node": {
+        "__typename": typename,
         "taken_at_timestamp": ts, "is_video": is_video, "product_type": product_type,
         "edge_liked_by": {"count": likes}, "edge_media_to_comment": {"count": comments},
         "edge_media_to_caption": {"edges": [{"node": {"text": caption}}] if caption else []},
@@ -306,6 +396,50 @@ def test_web_profile_info_full_activity():
     assert p.avg_engagement_rate == round((100 / 4 + 8 / 4) / 559 * 100, 2)
     assert p.sample_captions == ["softie era", "office reel", "june"]
     assert p.note == ""
+
+
+def test_web_profile_info_recent_posts_carry_type_likes_comments_and_ts():
+    _, p = igw.parse_web_profile_info(wpi(), "mmga.agency", NOW)
+    assert len(p.recent_posts) == 4
+    assert p.recent_posts[0] == {"type": "video", "caption": "softie era", "likes": 40, "comments": 4,
+                                 "ts": _ts(2026, 10, 27)}
+    assert p.recent_posts[1]["type"] == "image"
+    # an empty caption list is a post with no caption, which is known
+    assert p.recent_posts[2]["caption"] == ""
+    assert p.captions_known is True
+    assert p.formats_known is True
+    assert p.engagement_known is True
+
+
+def test_web_profile_info_carousel_type():
+    media = _media(_ts(2026, 11, 1), 5, 1, typename="GraphSidecar")
+    _, p = igw.parse_web_profile_info(wpi(edge_owner_to_timeline_media={"count": 1, "edges": [media]}), "a", NOW)
+    assert p.recent_posts[0]["type"] == "carousel"
+
+
+def test_web_profile_info_hidden_likes_make_engagement_unknown():
+    media = _media(_ts(2026, 11, 1), 0, 3)
+    media["node"]["like_and_view_counts_disabled"] = True
+    other = _media(_ts(2026, 10, 30), 20, 3)
+    _, p = igw.parse_web_profile_info(
+        wpi(edge_owner_to_timeline_media={"count": 2, "edges": [media, other]}), "a", NOW)
+    assert p.recent_posts[0]["likes"] is None
+    assert p.engagement_known is False
+
+
+def test_web_profile_info_negative_comment_count_is_unknown():
+    media = _media(_ts(2026, 11, 1), 10, -1)
+    _, p = igw.parse_web_profile_info(
+        wpi(edge_owner_to_timeline_media={"count": 1, "edges": [media]}), "a", NOW)
+    assert p.recent_posts[0]["comments"] is None
+    assert p.engagement_known is False
+
+
+def test_web_profile_info_highlight_count():
+    _, p = igw.parse_web_profile_info(wpi(highlight_reel_count=3), "a", NOW)
+    assert p.highlights_count == 3
+    _, p = igw.parse_web_profile_info(wpi(), "a", NOW)
+    assert p.highlights_count is None
 
 
 def test_web_profile_info_bio_links_count_as_link():

@@ -38,6 +38,24 @@ class SocialProfile:
     # are unknown, not zero, and analyzer/social_audit.py must not draw any
     # conclusion from them.
     activity_known: bool = True
+    # The recent posts the reader actually saw, in grid order (newest first,
+    # except pinned posts). Each is a dict:
+    #   {"type": "image" | "video" | "carousel" | "",   "" = not readable
+    #    "caption": str | None,                          None = not readable
+    #    "likes": int | None, "comments": int | None,    None = not readable
+    #    "ts": int | None}                               unix seconds (UTC), None = not readable
+    # None always means "not read", never 0.
+    recent_posts: list[dict] = field(default_factory=list)
+    # True only when EVERY recent post's caption / type was readable. The
+    # caption and format checks in analyzer/social_audit.py run only then.
+    captions_known: bool = False
+    formats_known: bool = False
+    # True only when likes AND comments were read for every recent post: the
+    # logged-in session reader. A public (logged-out) read never sees them,
+    # so every engagement check is skipped for it.
+    engagement_known: bool = False
+    # Story highlights shown on the profile, None when not read.
+    highlights_count: int | None = None
 
 
 def classify_frequency(posts_last_30_days: int) -> str:

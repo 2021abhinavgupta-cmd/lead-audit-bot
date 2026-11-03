@@ -312,6 +312,59 @@ def _caption(node: dict) -> str:
     return ""
 
 
+def _public_caption(node: dict) -> str | None:
+    """A public post's caption: "" when the post has none ("caption": null),
+    None when the page did not carry the field at all (unknown)."""
+    if "caption" not in node:
+        return None
+    cap = node.get("caption")
+    if cap is None:
+        return ""
+    if isinstance(cap, dict):
+        return (cap.get("text") or "").strip()
+    return None
+
+
+def _post_type(node: dict) -> str:
+    """video / carousel / image, or "" when the node does not say."""
+    if _is_video_node(node):
+        return "video"
+    tn = str(node.get("__typename") or "")
+    mt = node.get("media_type")
+    if ("Carousel" in tn or "Sidecar" in tn or mt == 8
+            or node.get("product_type") == "carousel_container" or "edge_sidecar_to_children" in node):
+        return "carousel"
+    if "Image" in tn or "Photo" in tn or mt == 1:
+        return "image"
+    return ""
+
+
+def _day_ts(d: date | None) -> int | None:
+    if d is None:
+        return None
+    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+
+
+def _count_or_none(d, key) -> int | None:
+    """Like _count, but None (not 0) when the count is missing or negative
+    (Instagram uses -1 for a hidden count)."""
+    v = (d or {}).get(key)
+    if isinstance(v, dict):
+        v = v.get("count")
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _public_highlights(user: dict) -> int | None:
+    """Story highlights on a logged-out page: the full list is embedded when
+    page_info says there is no next page; otherwise the count is unknown."""
+    conn = user.get("lox_highlights_connection")
+    if not isinstance(conn, dict) or not isinstance(conn.get("edges"), list):
+        return None
+    if (conn.get("page_info") or {}).get("has_next_page") is not False:
+        return None
+    return len(conn["edges"])
+
+
 def parse_public_page(html: str, handle: str, now: datetime, final_url: str = "") -> tuple[str, SocialProfile]:
     """Classify a logged-out profile page and read what it shows.
     kind is one of ok / private / not_found / login_wall / unreadable."""
@@ -365,8 +418,18 @@ def parse_public_page(html: str, handle: str, now: datetime, final_url: str = ""
     )
     p.uses_video = any(_is_video_node(n) for n in nodes)
     p.sample_captions = [c[:200] for c in (_caption(n) for n in nodes) if c][:5]
+    p.highlights_count = _public_highlights(user)
 
     dates = [_alt_date(n) for n in nodes]
+    # Logged out: type and caption are on the page, likes and comments never.
+    p.recent_posts = [
+        {"type": _post_type(n), "caption": _public_caption(n), "likes": None, "comments": None,
+         "ts": _day_ts(d)}
+        for n, d in zip(nodes, dates)
+    ]
+    p.captions_known = bool(nodes) and all(x["caption"] is not None for x in p.recent_posts)
+    p.formats_known = bool(nodes) and all(x["type"] for x in p.recent_posts)
+
     if PUBLIC_ACTIVITY_FROM_ALT_TEXT and nodes and all(dates):
         today = now.date()
         ages = [max(0, (today - d).days) for d in dates]
@@ -432,23 +495,54 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
         link_url=link,
     )
 
+    hl = user.get("highlight_reel_count")
+    if isinstance(hl, int) and not isinstance(hl, bool) and hl >= 0:
+        p.highlights_count = hl
+
     cutoff = now - timedelta(days=30)
     total_likes = total_comments = 0
     taken = []
     captions = []
+    posts = []
     for n in nodes:
         total_likes += _count(n, "edge_liked_by") or _count(n, "edge_media_preview_like")
         total_comments += _count(n, "edge_media_to_comment")
         ts = n.get("taken_at_timestamp")
+        post_ts = None
         if isinstance(ts, (int, float)) and ts > 0:
             taken.append(datetime.fromtimestamp(ts, tz=timezone.utc))
-        cap_edges = (n.get("edge_media_to_caption") or {}).get("edges") or []
+            post_ts = int(ts)
+        cap_field = n.get("edge_media_to_caption")
+        cap_edges = (cap_field.get("edges") or []) if isinstance(cap_field, dict) else []
         text = ((cap_edges[0] or {}).get("node") or {}).get("text", "") if cap_edges else ""
         if text and text.strip() and len(captions) < 5:
             captions.append(text.strip()[:200])
+        if n.get("like_and_view_counts_disabled"):
+            likes = None
+        else:
+            likes = _count_or_none(n, "edge_liked_by")
+            if likes is None:
+                likes = _count_or_none(n, "edge_media_preview_like")
+        posts.append({
+            "type": _post_type(n),
+            "caption": (text or "").strip() if isinstance(cap_field, dict) else None,
+            "likes": likes,
+            "comments": _count_or_none(n, "edge_media_to_comment"),
+            "ts": post_ts,
+        })
 
     p.uses_video = any(_is_video_node(n) for n in nodes)
     p.sample_captions = captions
+    p.recent_posts = posts
+    p.captions_known = bool(posts) and all(x["caption"] is not None for x in posts)
+    p.formats_known = bool(posts) and all(x["type"] for x in posts)
+    p.engagement_known = (bool(posts) and followers > 0
+                          and all(x["likes"] is not None and x["comments"] is not None for x in posts))
+    if nodes and followers > 0:
+        # likes and comments do not depend on the dates, so this holds even
+        # when the dates below are incomplete
+        count = len(nodes)
+        p.avg_engagement_rate = round((total_likes / count + total_comments / count) / followers * 100, 2)
     if (nodes and len(taken) != len(nodes)) or (not nodes and p.posts_count > 0):
         # posts exist but their dates were not all returned: do not guess
         p.activity_known = False
@@ -458,9 +552,6 @@ def parse_web_profile_info(payload: dict, handle: str, now: datetime) -> tuple[s
     p.posts_last_30_days = sum(1 for t in taken if t >= cutoff)
     p.last_post_age_days = max(0, (now - max(taken)).days) if taken else None
     p.posting_frequency = classify_frequency(p.posts_last_30_days)
-    if nodes and followers > 0:
-        count = len(nodes)
-        p.avg_engagement_rate = round((total_likes / count + total_comments / count) / followers * 100, 2)
     return "ok", p
 
 

@@ -47,6 +47,8 @@ def _legacy(handle: str, sc) -> SocialProfile | None:
         posts_last_30_days=data.posts_last_30_days,
         posting_frequency=data.posting_frequency,
         avg_engagement_rate=data.engagement_rate,
+        # instagrapi reads logged in, so likes and comments were counted
+        engagement_known=data.engagement_rate > 0,
         uses_video=data.uses_reels,
         has_link_in_bio=data.has_link_in_bio,
         sample_captions=list(data.sample_captions),
