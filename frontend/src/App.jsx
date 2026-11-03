@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { createPdfReport, reportErrorMessage, blobErrorMessage } from './pdfReport';
+import { parseInstagramUsername } from './fullAudit';
 import ImportView from './ImportView.jsx';
 import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot, FileSpreadsheet } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -2667,11 +2668,8 @@ function App() {
   // skipping the Maps search. Adds a card at the top and runs the normal social audit.
   const handleSocialUsername = async (e) => {
     if (e) e.preventDefault();
-    const raw = socialUsername.trim()
-      .replace(/^https?:\/\/(www\.)?instagram\.com\//i, '')
-      .replace(/^@/, '')
-      .split(/[/?#]/)[0];
-    if (!/^[A-Za-z0-9._]{1,30}$/.test(raw)) {
+    const raw = parseInstagramUsername(socialUsername);
+    if (!raw) {
       alert('Enter a valid Instagram username, @username or profile link.');
       return;
     }
@@ -2860,8 +2858,9 @@ function App() {
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   };
 
-  const handleSocialPdf = async (biz, index, platform, mode) => {
-    const key = `${index}-${platform}`;
+  // keyPrefix: the Social tab passes the result's index, the Full Audit page 'full'.
+  const handleSocialPdf = async (biz, keyPrefix, platform, mode) => {
+    const key = `${keyPrefix}-${platform}`;
     const data = (biz.audit || {})[platform];
     if (!data || socialPdfBusy[key]) return;
     const p = data.profile || {};
@@ -2900,10 +2899,31 @@ function App() {
     }
   };
 
-  const renderSocialAuditResult = (biz, index) => (
+  // The Social tab's view of result `i` in socialBusinesses. renderSocialAuditResult
+  // takes any business object plus such a view, so the Full Audit page can render
+  // a business it holds in its own state with the same block.
+  const socialResultView = (i) => ({
+    key: String(i),
+    setCopy: (platform, channel, field, value) => setSocialCopy(i, platform, channel, field, value),
+    onCombined: (biz, platform) => handleSocialCombinedPdf(biz, i, platform),
+  });
+
+  // view: { key, setCopy(platform, channel, field, value), onCombined(biz, platform),
+  //         combinedReady?, combinedHint?, combinedOptionTitle?, combinedMissingLabel? }
+  // The combined* fields default to the Social tab wording (needs biz.website).
+  const renderSocialAuditResult = (biz, view) => {
+    const combinedReady = view.combinedReady ?? !!biz.website;
+    const combinedHint = view.combinedHint ?? (biz.website
+      ? ' Combined: the website design audit followed by the long Instagram audit in one file, safe to attach (takes about a minute).'
+      : ' Combined needs a website for this business.');
+    const combinedOptionTitle = view.combinedOptionTitle ?? (biz.website
+      ? 'The website audit and the Instagram audit in one PDF.'
+      : 'No website for this business, so there is no website audit to combine.');
+    const combinedMissingLabel = view.combinedMissingLabel ?? 'Combined PDF: website + Instagram audit (no website)';
+    return (
     <div style={{ marginTop: '14px', borderTop: '1px solid rgba(148,163,184,0.2)', paddingTop: '14px' }}>
       {Object.entries(biz.audit).map(([platform, data]) => {
-        const chanKey = `${index}-${platform}`;
+        const chanKey = `${view.key}-${platform}`;
         const active = socialActiveChannel[chanKey] || 'email';
         const meta = PLATFORM_META[platform] || { label: platform, color: '#64748b' };
         return (
@@ -2924,16 +2944,12 @@ function App() {
                   value=""
                   disabled={!!socialPdfBusy[chanKey]}
                   title={'Small: the email, profile numbers, issues and scores, for us. Long: the full audit written for the business, safe to attach (no scores, no email).'
-                    + (platform === 'instagram'
-                      ? (biz.website
-                        ? ' Combined: the website design audit followed by the long Instagram audit in one file, safe to attach (takes about a minute).'
-                        : ' Combined needs a website for this business.')
-                      : '')}
+                    + (platform === 'instagram' ? combinedHint : '')}
                   style={{ cursor: 'pointer', padding: '2px 10px', fontSize: '12px', marginLeft: 'auto' }}
                   onChange={(ev) => {
                     const choice = ev.target.value;
-                    if (choice === 'small' || choice === 'long') handleSocialPdf(biz, index, platform, choice);
-                    if (choice === 'combined') handleSocialCombinedPdf(biz, index, platform);
+                    if (choice === 'small' || choice === 'long') handleSocialPdf(biz, view.key, platform, choice);
+                    if (choice === 'combined') view.onCombined(biz, platform);
                   }}
                 >
                   <option value="">{socialPdfBusy[chanKey] ? 'Making PDF...' : 'Download PDF ▾'}</option>
@@ -2942,10 +2958,10 @@ function App() {
                   {platform === 'instagram' && (
                     <option
                       value="combined"
-                      disabled={!biz.website || (!(data.issues || []).length && !data.profile.followers)}
-                      title={biz.website ? 'The website audit and the Instagram audit in one PDF.' : 'No website for this business, so there is no website audit to combine.'}
+                      disabled={!combinedReady || (!(data.issues || []).length && !data.profile.followers)}
+                      title={combinedOptionTitle}
                     >
-                      {biz.website ? 'Combined PDF: website + Instagram audit' : 'Combined PDF: website + Instagram audit (no website)'}
+                      {combinedReady ? 'Combined PDF: website + Instagram audit' : combinedMissingLabel}
                     </option>
                   )}
                 </select>
@@ -3006,14 +3022,14 @@ function App() {
                     {active === 'email' && (
                       <input
                         value={data.outreach.email?.subject || ''}
-                        onChange={e => setSocialCopy(index, platform, 'email', 'subject', e.target.value)}
+                        onChange={e => view.setCopy(platform, 'email', 'subject', e.target.value)}
                         placeholder="Subject"
                         style={{ width: '100%', padding: '8px', marginBottom: '6px', fontWeight: 600 }}
                       />
                     )}
                     <textarea
                       value={data.outreach[active]?.body || ''}
-                      onChange={e => setSocialCopy(index, platform, active, 'body', e.target.value)}
+                      onChange={e => view.setCopy(platform, active, 'body', e.target.value)}
                       rows={active === 'email' ? 7 : 4}
                       style={{ width: '100%', padding: '8px' }}
                     />
@@ -3033,7 +3049,8 @@ function App() {
         );
       })}
     </div>
-  );
+    );
+  };
 
   const renderSocial = () => (
     <div className="glass" style={{ padding: '24px' }}>
@@ -3092,7 +3109,7 @@ function App() {
                 {b.auditing ? 'Auditing socials...' : 'Audit socials'}
               </button>
             </div>
-            {b.audit && renderSocialAuditResult(b, i)}
+            {b.audit && renderSocialAuditResult(b, socialResultView(i))}
           </div>
         ))}
       </div>
