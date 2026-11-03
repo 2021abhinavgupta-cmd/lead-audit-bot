@@ -37,32 +37,37 @@ def audit_profile(profile: SocialProfile) -> list[SocialIssue]:
     p = profile
     plat = p.platform
 
-    inactive = p.posts_last_30_days == 0 or (
-        p.last_post_age_days is not None and p.last_post_age_days > 45
-    )
-    if inactive:
-        issues.append(SocialIssue(
-            "high", "Inactive account",
-            "The account has gone quiet, so anyone who checks it sees a page that looks abandoned.",
-        ))
+    # Activity checks only run when the adapter actually saw the posting
+    # activity. On a header-only read (activity_known=False) the activity
+    # fields sit at their zero defaults, and treating those as facts would put
+    # a false "Inactive account" on every such profile.
+    if p.activity_known:
+        inactive = p.posts_last_30_days == 0 or (
+            p.last_post_age_days is not None and p.last_post_age_days > 45
+        )
+        if inactive:
+            issues.append(SocialIssue(
+                "high", "Inactive account",
+                "The account has gone quiet, so anyone who checks it sees a page that looks abandoned.",
+            ))
 
-    if not inactive and p.posting_frequency in ("irregular", "weekly") and p.followers > 1000:
-        issues.append(SocialIssue(
-            "medium", "Posting has slowed",
-            "Posts are going out only now and then, which is not enough to stay in front of followers.",
-        ))
+        if not inactive and p.posting_frequency in ("irregular", "weekly") and p.followers > 1000:
+            issues.append(SocialIssue(
+                "medium", "Posting has slowed",
+                "Posts are going out only now and then, which is not enough to stay in front of followers.",
+            ))
 
-    if plat in ("instagram", "facebook") and p.followers > 500 and 0 < p.avg_engagement_rate < 0.5:
-        issues.append(SocialIssue(
-            "medium", "Low engagement",
-            "Very few of the followers like or comment, so the posts are barely being seen.",
-        ))
+        if plat in ("instagram", "facebook") and p.followers > 500 and 0 < p.avg_engagement_rate < 0.5:
+            issues.append(SocialIssue(
+                "medium", "Low engagement",
+                "Very few of the followers like or comment, so the posts are barely being seen.",
+            ))
 
-    if not p.uses_video:
-        issues.append(SocialIssue(
-            "medium", "Not using short video",
-            "There are no reels or short videos, and that is the format the platform pushes hardest right now.",
-        ))
+        if not p.uses_video:
+            issues.append(SocialIssue(
+                "medium", "Not using short video",
+                "There are no reels or short videos, and that is the format the platform pushes hardest right now.",
+            ))
 
     if plat in ("instagram", "facebook") and not p.has_link_in_bio:
         issues.append(SocialIssue(
@@ -82,7 +87,9 @@ def audit_profile(profile: SocialProfile) -> list[SocialIssue]:
             "The account follows more people than follow it back, which reads as a brand that is still finding its feet.",
         ))
 
-    if p.posts_count < 9:
+    # On a header-only read a 0 means "count not read", not "no posts".
+    post_count_known = p.activity_known or p.posts_count > 0
+    if post_count_known and p.posts_count < 9:
         issues.append(SocialIssue(
             "low", "Thin content history",
             "There are only a few posts in total, so the page has little for a new visitor to look through.",

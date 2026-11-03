@@ -54,3 +54,28 @@ def test_unparseable_response_returns_empty_body_not_crash():
     out = generate_social_outreach("Acme", _PROFILE, _ISSUES, "email", ai_call=fake_call)
     assert out["body"] == ""
     assert out["cost"] == 0.0
+
+
+def test_public_only_outreach_prompt_is_grounded_only_in_the_issue_list():
+    from analyzer.social_audit import audit_profile
+    profile = SocialProfile(
+        platform="instagram", handle="acme", url="https://instagram.com/acme",
+        followers=3000, following=40, posts_count=86, bio="hi", has_link_in_bio=False,
+        activity_known=False,
+        note="Limited view: public profile data only (post dates and engagement not available)",
+    )
+    issues = audit_profile(profile)
+    prompt = _build_outreach_prompt("Acme", profile, issues, "email", "Kshitij")
+    seen = []
+
+    def fake_call(p):
+        seen.append(p)
+        return json.dumps({"subject": "S", "body": "B"}), 0.0
+
+    generate_social_outreach("Acme", profile, issues, "email", ai_call=fake_call)
+    assert seen == [prompt]
+    for i in issues:
+        assert i.label in prompt
+    # nothing about activity the reader never saw, and no raw numbers
+    for absent in ("Inactive", "slowed", "engagement", "short video", "3000", "86"):
+        assert absent not in prompt

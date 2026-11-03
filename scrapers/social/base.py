@@ -26,10 +26,18 @@ class SocialProfile:
     avg_engagement_rate: float = 0.0
     uses_video: bool = False
     has_link_in_bio: bool = False
+    link_url: str = ""       # the bio link itself, when the adapter could read it
     last_post_age_days: int | None = None
     sample_captions: list[str] = field(default_factory=list)
     analyzed: bool = True
     note: str = ""
+    # False when the adapter could read the profile header (followers, bio,
+    # link, post count) but NOT the posting activity (post dates, engagement,
+    # post formats) — e.g. a logged-out Instagram read. Then
+    # posts_last_30_days / avg_engagement_rate / uses_video / posting_frequency
+    # are unknown, not zero, and analyzer/social_audit.py must not draw any
+    # conclusion from them.
+    activity_known: bool = True
 
 
 def classify_frequency(posts_last_30_days: int) -> str:

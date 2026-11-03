@@ -35,3 +35,9 @@ def test_unanalyzed_helper():
     assert p.note == "login wall"
     assert p.platform == "facebook"
     assert p.followers == 0
+
+
+def test_socialprofile_activity_known_defaults_true_and_link_url_empty():
+    p = SocialProfile(platform="instagram", handle="acme", url="https://instagram.com/acme")
+    assert p.activity_known is True
+    assert p.link_url == ""
