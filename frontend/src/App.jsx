@@ -2781,12 +2781,19 @@ function App() {
             {!data.profile && <p style={{ color: '#94a3b8', fontSize: '13px' }}>{data.note || 'Could not analyze this profile.'}</p>}
             {data.profile && (
               <>
-                <p style={{ fontSize: '13px', color: '#475569', margin: '2px 0' }}>
-                  {Number(data.profile.followers || 0).toLocaleString()} followers
-                  {data.profile.posting_frequency ? ` · ${data.profile.posting_frequency}` : ''}
-                  {data.profile.avg_engagement_rate ? ` · ${data.profile.avg_engagement_rate}% engagement` : ''}
-                </p>
+                {data.profile.analyzed !== false && (
+                  <p style={{ fontSize: '13px', color: '#475569', margin: '2px 0' }}>
+                    {Number(data.profile.followers || 0).toLocaleString()} followers
+                    {data.profile.following ? ` · ${Number(data.profile.following).toLocaleString()} following` : ''}
+                    {data.profile.posts_count ? ` · ${Number(data.profile.posts_count).toLocaleString()} posts` : ''}
+                    {data.profile.posting_frequency ? ` · ${data.profile.posting_frequency}` : ''}
+                    {data.profile.avg_engagement_rate ? ` · ${data.profile.avg_engagement_rate}% engagement` : ''}
+                  </p>
+                )}
                 {data.note && <p style={{ color: '#94a3b8', fontSize: '12px' }}>{data.note}</p>}
+                {data.profile.note && data.profile.note !== data.note && (
+                  <p style={{ color: '#94a3b8', fontSize: '12px', margin: '2px 0' }}>{data.profile.note}</p>
+                )}
                 {(data.issues || []).length > 0 && (
                   <ul style={{ margin: '8px 0', paddingLeft: '18px' }}>
                     {data.issues.map((iss, k) => (
