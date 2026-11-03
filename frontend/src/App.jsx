@@ -300,6 +300,8 @@ function App() {
   const [socialSearching, setSocialSearching] = useState(false);
   const [socialSearchStage, setSocialSearchStage] = useState('');
   const [socialActiveChannel, setSocialActiveChannel] = useState({});
+  // Which "<index>-<platform>" Social PDF is being made right now.
+  const [socialPdfBusy, setSocialPdfBusy] = useState({});
   const [socialDrafts, setSocialDrafts] = useState([]);
   const [socialDraftsGroupBy, setSocialDraftsGroupBy] = useState('day');
   const [historyGroupBy, setHistoryGroupBy] = useState('day');
@@ -2704,7 +2706,7 @@ function App() {
         const res = await axios.get(`${API_BASE}/api/social/audit/result`, { params: { key } });
         if (res.data.ready) {
           if (res.data.error) { alert(`Social audit failed: ${res.data.error}`); break; }
-          setSocialBusinesses(prev => prev.map((b, i) => i === index ? { ...b, audit: res.data.results || {} } : b));
+          setSocialBusinesses(prev => prev.map((b, i) => i === index ? { ...b, audit: res.data.results || {}, auditedAt: new Date().toISOString() } : b));
           break;
         }
       }
@@ -2807,6 +2809,63 @@ function App() {
     }
   };
 
+  // The typical (median) post: from the audit's engagement summary, else
+  // worked out from the posts whose likes AND comments were read (4+).
+  const socialTypicalPost = (data) => {
+    if (data.engagement) return data.engagement;
+    const p = data.profile || {};
+    const read = (p.recent_posts || []).filter(x => x && x.likes != null && x.comments != null);
+    if (!p.engagement_known || read.length < 4) return null;
+    const med = (vals) => {
+      const s = [...vals].sort((a, b) => a - b);
+      const m = Math.floor(s.length / 2);
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    return { median_likes: med(read.map(x => x.likes)), median_comments: med(read.map(x => x.comments)), posts_read: read.length };
+  };
+
+  const handleSocialPdf = async (biz, index, platform, mode) => {
+    const key = `${index}-${platform}`;
+    const data = (biz.audit || {})[platform];
+    if (!data || socialPdfBusy[key]) return;
+    const p = data.profile || {};
+    const typical = socialTypicalPost(data);
+    setSocialPdfBusy(b => ({ ...b, [key]: true }));
+    try {
+      const res = await axios.post(`${API_BASE}/api/social-pdf`, {
+        mode, company: biz.company || '', platform, handle: p.handle || '',
+        profile_url: p.url || '', website: biz.website || '',
+        profile: {
+          followers: p.followers ?? null, following: p.following ?? null, posts_count: p.posts_count ?? null,
+          bio: p.bio || '', note: p.note || '',
+          engagement_rate: typical ? (p.avg_engagement_rate || null) : null,
+          median_likes: typical ? typical.median_likes : null,
+          median_comments: typical ? typical.median_comments : null,
+          posts_read: typical ? typical.posts_read : null,
+          link_in_bio: p.has_link_in_bio ?? null,
+        },
+        issues: (data.issues || []).map(i => ({ severity: i.severity || '', label: i.label || '', detail: i.detail || '' })),
+        email: { subject: data.outreach?.email?.subject || '', body: data.outreach?.email?.body || '' },
+        lead_score: data.lead_score || null,
+        audience_quality: data.audience_quality
+          ? { label: data.audience_quality.label || '', score: data.audience_quality.score ?? null,
+              signals: (data.audience_quality.signals || []).map(s => ({ detail: s.detail || '' })) }
+          : null,
+        timestamp: new Date(biz.auditedAt || Date.now()).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
+      }, { responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(biz.company || p.handle || 'social').replace(/[^A-Za-z0-9]+/g, '-')}-social-${mode}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      alert('PDF failed: ' + (err?.message || 'unknown error'));
+    } finally {
+      setSocialPdfBusy(b => ({ ...b, [key]: false }));
+    }
+  };
+
   const renderSocialAuditResult = (biz, index) => (
     <div style={{ marginTop: '14px', borderTop: '1px solid rgba(148,163,184,0.2)', paddingTop: '14px' }}>
       {Object.entries(biz.audit).map(([platform, data]) => {
@@ -2825,6 +2884,23 @@ function App() {
                   {data.lead_score.label} lead · {data.lead_score.score}
                 </span>
               )}
+              {data.profile && (
+                <select
+                  className="reject-btn"
+                  value=""
+                  disabled={!!socialPdfBusy[chanKey]}
+                  title="Small: the email, profile numbers, issues and scores, for us. Long: the full audit written for the business, safe to attach (no scores, no email)."
+                  style={{ cursor: 'pointer', padding: '2px 10px', fontSize: '12px', marginLeft: 'auto' }}
+                  onChange={(ev) => {
+                    const choice = ev.target.value;
+                    if (choice === 'small' || choice === 'long') handleSocialPdf(biz, index, platform, choice);
+                  }}
+                >
+                  <option value="">{socialPdfBusy[chanKey] ? 'Making PDF...' : 'Download PDF ▾'}</option>
+                  <option value="small">Small PDF: email, profile and scores</option>
+                  <option value="long" disabled={!(data.issues || []).length && !data.profile.followers}>Long PDF: full Instagram audit</option>
+                </select>
+              )}
             </div>
             {data.lead_score && (data.lead_score.reasons || []).length > 0 && (
               <ul style={{ margin: '0 0 6px', paddingLeft: '18px', color: '#64748b', fontSize: '12px' }}>
@@ -2840,7 +2916,13 @@ function App() {
                     {data.profile.following ? ` · ${Number(data.profile.following).toLocaleString()} following` : ''}
                     {data.profile.posts_count ? ` · ${Number(data.profile.posts_count).toLocaleString()} posts` : ''}
                     {data.profile.posting_frequency ? ` · ${data.profile.posting_frequency}` : ''}
-                    {data.profile.avg_engagement_rate ? ` · ${data.profile.avg_engagement_rate}% engagement` : ''}
+                    {data.profile.avg_engagement_rate ? ` · typical post ${data.profile.avg_engagement_rate}% engagement` : ''}
+                  </p>
+                )}
+                {data.profile.analyzed !== false && socialTypicalPost(data) && (
+                  <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0' }}>
+                    Typical post: about {Number(socialTypicalPost(data).median_likes).toLocaleString()} likes and{' '}
+                    {Number(socialTypicalPost(data).median_comments).toLocaleString()} comments (median of {socialTypicalPost(data).posts_read} posts read)
                   </p>
                 )}
                 {data.note && <p style={{ color: '#94a3b8', fontSize: '12px' }}>{data.note}</p>}
