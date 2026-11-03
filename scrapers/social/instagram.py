@@ -1,25 +1,40 @@
 """
-Instagram adapter — thin mapping from the existing InstagramScraper's
-InstagramData onto the shared SocialProfile. All the scraping, session
-handling and the challenge circuit breaker live in scrapers/instagram.py
-and are unchanged.
+Instagram adapter.
+
+Primary path: scrapers/social/instagram_web.py's read_instagram (spare
+Playwright session when one is saved, else the public logged-out page). It
+always returns a SocialProfile, analyzed=False with a note when Instagram
+could not be read.
+
+Legacy path: the instagrapi InstagramScraper in scrapers/instagram.py, kept
+only as a fallback for when the web reader itself crashes unexpectedly
+(instagrapi's Client.login currently crashes before sending credentials, so
+in practice this path returns None).
+
+Test seam: passing `scraper=` without `web_reader=` runs the legacy path
+alone (the original behaviour, no browser); pass `web_reader=` to inject a
+fake web reader.
 """
 
 from scrapers.instagram import InstagramScraper
 from scrapers.social.base import SocialProfile
+from scrapers.social.instagram_web import read_instagram
 
-_scraper = InstagramScraper()
+_scraper = None
+_UNSET = object()
 
 
-def fetch_instagram(handle: str, scraper=None) -> SocialProfile | None:
-    """Return a SocialProfile for *handle*, or None if the profile is not
-    found or Instagram is currently in a challenge cooldown."""
-    handle = handle.lstrip("@").strip()
-    sc = scraper or _scraper
+def _legacy_scraper():
+    global _scraper
+    if _scraper is None:
+        _scraper = InstagramScraper()
+    return _scraper
+
+
+def _legacy(handle: str, sc) -> SocialProfile | None:
     data = sc.get_instagram_data(handle)
     if data is None:
         return None
-
     return SocialProfile(
         platform="instagram",
         handle=handle,
@@ -36,3 +51,24 @@ def fetch_instagram(handle: str, scraper=None) -> SocialProfile | None:
         has_link_in_bio=data.has_link_in_bio,
         sample_captions=list(data.sample_captions),
     )
+
+
+def fetch_instagram(handle: str, scraper=None, web_reader=_UNSET) -> SocialProfile | None:
+    """Return a SocialProfile for *handle* (analyzed=False with a note when
+    Instagram could not be read), or None only when both the web reader
+    crashed and the legacy scraper found nothing."""
+    handle = handle.lstrip("@").strip()
+    if web_reader is _UNSET:
+        web_reader = None if scraper is not None else (lambda h: read_instagram(h))
+
+    if web_reader is not None:
+        try:
+            return web_reader(handle)
+        except Exception as e:  # noqa: BLE001  (unexpected bug: fall back, never crash the audit)
+            print(f"[Instagram] web reader crashed, trying the legacy scraper: {e!r}")
+
+    try:
+        return _legacy(handle, scraper or _legacy_scraper())
+    except Exception as e:  # noqa: BLE001
+        print(f"[Instagram] legacy scraper failed too: {e!r}")
+        return None
