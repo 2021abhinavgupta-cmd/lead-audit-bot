@@ -294,6 +294,8 @@ function App() {
   const [socialNiche, setSocialNiche] = useState('');
   const [socialCity, setSocialCity] = useState('');
   const [socialLimit, setSocialLimit] = useState(10);
+  const [socialUsername, setSocialUsername] = useState('');
+  const [socialCompanyName, setSocialCompanyName] = useState('');
   const [socialBusinesses, setSocialBusinesses] = useState([]);
   const [socialSearching, setSocialSearching] = useState(false);
   const [socialSearchStage, setSocialSearchStage] = useState('');
@@ -2621,8 +2623,33 @@ function App() {
     }
   };
 
-  const handleSocialAudit = async (index) => {
-    const biz = socialBusinesses[index];
+  // Audit one Instagram profile typed by hand (username, @username or profile link),
+  // skipping the Maps search. Adds a card at the top and runs the normal social audit.
+  const handleSocialUsername = async (e) => {
+    if (e) e.preventDefault();
+    const raw = socialUsername.trim()
+      .replace(/^https?:\/\/(www\.)?instagram\.com\//i, '')
+      .replace(/^@/, '')
+      .split(/[/?#]/)[0];
+    if (!/^[A-Za-z0-9._]{1,30}$/.test(raw)) {
+      alert('Enter a valid Instagram username, @username or profile link.');
+      return;
+    }
+    const biz = {
+      company: socialCompanyName.trim() || raw,
+      website: '',
+      handles: { instagram: `https://www.instagram.com/${raw}/` },
+      audit: null,
+      auditing: false,
+    };
+    setSocialBusinesses(prev => [biz, ...prev]);
+    setSocialUsername('');
+    setSocialCompanyName('');
+    await handleSocialAudit(0, biz);
+  };
+
+  const handleSocialAudit = async (index, bizOverride) => {
+    const biz = bizOverride || socialBusinesses[index];
     const handles = Object.fromEntries(
       Object.entries(biz.handles || {}).filter(([, v]) => !!v)
     );
@@ -2829,6 +2856,14 @@ function App() {
         <input type="number" min="1" max="30" value={socialLimit} onChange={e => setSocialLimit(e.target.value)} style={{ width: '80px', padding: '10px' }} />
         <button type="submit" disabled={socialSearching} className="primary-btn" style={{ background: '#10b981', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold' }}>
           {socialSearching ? 'Searching...' : 'Find Businesses'}
+        </button>
+      </form>
+
+      <form onSubmit={handleSocialUsername} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '20px' }}>
+        <input value={socialUsername} onChange={e => setSocialUsername(e.target.value)} placeholder="Or audit one Instagram account: username or profile link" style={{ flex: '2 1 260px', padding: '10px' }} />
+        <input value={socialCompanyName} onChange={e => setSocialCompanyName(e.target.value)} placeholder="Company name (optional)" style={{ flex: '1 1 160px', padding: '10px' }} />
+        <button type="submit" className="primary-btn" style={{ background: '#e1306c', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold' }}>
+          Audit this profile
         </button>
       </form>
 
