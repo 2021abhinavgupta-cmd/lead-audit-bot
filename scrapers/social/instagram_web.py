@@ -761,9 +761,12 @@ def read_instagram(handle: str, *, public_fetch=None, session_fetch=_DEFAULT, th
                         if verdict == "not_found":
                             return unanalyzed("instagram", h, url, NOTE_NOT_FOUND)
                         if verdict == "rate_limited":
-                            th.trip()
-                            return unanalyzed("instagram", h, url, th.blocked_note() or "")
-                        if verdict == "session_dead":
+                            # The session API is rate limited; the public page is a
+                            # different path, so pause only the session and fall back.
+                            th.mark_session_dead()
+                            session_note = ("Instagram rate limited the spare session, "
+                                            "showing the public view instead.")
+                        elif verdict == "session_dead":
                             th.mark_session_dead()
                             session_note = NOTE_RELOGIN
                         else:

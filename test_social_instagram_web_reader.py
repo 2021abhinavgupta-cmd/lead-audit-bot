@@ -137,16 +137,17 @@ def test_session_other_http_error_falls_back_to_public(th):
     assert "spare Instagram session" in p.note
 
 
-def test_session_rate_limit_trips_cooldown_and_skips_public(th):
+def test_session_rate_limit_falls_back_to_public_without_a_global_cooldown(th):
     pub = Public()
     ses = Session(SessionResult("response", status=429, payload=None))
     p = _read(public_fetch=pub, session_fetch=ses, throttle=th)
-    assert p.analyzed is False and "slow down" in p.note
-    assert pub.calls == []
-    # cooldown: nothing touches Instagram on the next read
+    # the public page still answers, with a note that the session was rate limited
+    assert p.analyzed is True and "rate limited the spare session" in p.note
+    assert pub.calls == ["mmga.agency"]
+    # the session is parked, but the public page keeps working on the next read
     p2 = _read(public_fetch=pub, session_fetch=ses, throttle=th)
-    assert p2.analyzed is False and "paused" in p2.note
-    assert ses.calls == ["mmga.agency"] and pub.calls == []
+    assert p2.analyzed is True
+    assert ses.calls == ["mmga.agency"] and len(pub.calls) == 2
 
 
 def test_session_not_found_is_final(th):
