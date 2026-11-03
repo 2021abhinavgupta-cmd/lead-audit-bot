@@ -203,6 +203,19 @@ def test_long_page_numbers_start_at_two_or_continue_from_start_page():
     assert "5 findings" in _visible(social_pdf.build_long_html(data))
 
 
+def test_long_findings_with_long_text_get_a_page_each_so_nothing_is_clipped():
+    # pages are fixed A4 with overflow hidden, so two long findings may not share one
+    long_detail = ("The bio link opens a page that never finishes loading on a phone, " * 16)[:1000]
+    issues = [dict(i, detail=long_detail) for i in ISSUES[:2]]
+    html = social_pdf.build_long_html(body("long", issues=issues))
+    finding_pages = [p for p in html.split('<section class="page')[1:] if 'class="finding"' in p]
+    assert [p.count('class="finding"') for p in finding_pages] == [1, 1]
+    # short ones still pair up, two to a page like the website report
+    html = social_pdf.build_long_html(body("long"))
+    finding_pages = [p for p in html.split('<section class="page')[1:] if 'class="finding"' in p]
+    assert [p.count('class="finding"') for p in finding_pages] == [2, 2, 1]
+
+
 def test_long_without_issues_or_numbers_still_renders():
     assert "Nothing urgent" in _visible(social_pdf.build_long_html(body("long", issues=[])))
     html = social_pdf.build_long_html(body("long", profile={}))

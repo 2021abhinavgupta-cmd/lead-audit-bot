@@ -375,6 +375,22 @@ def _stats(rows) -> str:
     return f'<ul class="stats">{"".join(items)}</ul>' if items else ""
 
 
+# Room for findings on one page (A4 297 mm less the 18 mm top padding and the
+# footer band), and a rough height of one finding block in the theme's type:
+# about 44 characters a line in a half width column, 5.8 mm a line.
+_PAGE_BODY_MM = 245
+
+
+def _finding_mm(issue: dict) -> float:
+    def lines(text: str, per_line: int = 44) -> int:
+        return max(1, -(-len(text or "") // per_line))
+    label = issue.get("label") or ""
+    left = (lines(issue.get("detail")) + lines(why_for(label))) * 5.8 + 18
+    right = lines(fix_for(label)) * 5.8 + 6
+    head = max(13, 6 + lines(label, 30) * 7.3) + 4
+    return head + max(left, right) + 9
+
+
 def build_long_html(data: dict, *, sender_name: str = "", sender_email: str = "", start_page: int = 1) -> str:
     """The client facing audit. start_page is the page number of the cover: 1 on
     its own, the website report's page count plus one inside the combined PDF."""
@@ -416,8 +432,19 @@ def build_long_html(data: dict, *, sender_name: str = "", sender_email: str = ""
         columns=[[("What we found", i.get("detail") or ""), ("Why it matters", why_for(i.get("label")))],
                  [("What we would do", fix_for(i.get("label")))]])
         for k, i in enumerate(issues, 1)]
-    for at in range(0, len(blocks), 2):          # two findings a page, like the website report
-        pages.append(theme.page("".join(blocks[at:at + 2]) + theme.footer(theme.BRAND, n)))
+    # Two findings a page, like the website report, unless together they would
+    # run past the footer (pages are fixed A4 with overflow hidden).
+    queue, used = [], 0.0
+    for block, issue in zip(blocks, issues):
+        h = _finding_mm(issue)
+        if queue and (len(queue) == 2 or used + h > _PAGE_BODY_MM):
+            pages.append(theme.page("".join(queue) + theme.footer(theme.BRAND, n)))
+            n += 1
+            queue, used = [], 0.0
+        queue.append(block)
+        used += h
+    if queue:
+        pages.append(theme.page("".join(queue) + theme.footer(theme.BRAND, n)))
         n += 1
 
     pages.append(theme.closing_page(top, contact_email=(sender_email or "").strip(), number=n,
