@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { createPdfReport, reportErrorMessage, blobErrorMessage } from './pdfReport';
-import { parseInstagramUsername } from './fullAudit';
+import { createPdfReport, downloadReportPdf, reportErrorMessage, blobErrorMessage } from './pdfReport';
+import { parseInstagramUsername, normaliseWebsite, defaultCompany } from './fullAudit';
 import ImportView from './ImportView.jsx';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot, FileSpreadsheet } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot, FileSpreadsheet, Layers } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import { AGRI_NICHES } from './agriNiches';
@@ -99,6 +99,16 @@ const HELP_CONTENT = {
       'Every email actually sent (not just drafted) shows up here, with open/reply status if tracking is enabled for this deployment.',
       '"Check for replies" scans the connected inbox for genuine replies — auto-replies and bounces are detected and excluded, not counted as engagement.',
       'The variant performance table compares reply rates between different email copy styles — treat any row under ~20 sends as too little data to draw a conclusion from yet.',
+    ],
+  },
+  fullaudit: {
+    title: 'Full Audit: one business, Instagram and website together',
+    tips: [
+      'Type an Instagram username (or @username, or the profile link) and the website link, then Run full audit. Both audits start at once and each shows its own progress line.',
+      'Instagram reads are slow on purpose (20 seconds between loads, at most 20 an hour), so an Instagram audit takes about 2 minutes. The website audit takes about a minute, or waits as "queued" while another audit is using the browser.',
+      'If one audit fails, the other still finishes and keeps its result. With only one of the two filled in, only that audit runs.',
+      'Download combined PDF puts the website audit and the long Instagram audit in one client facing file. The edited email, lead score and audience quality are never in it.',
+      'Nothing here is saved: the last result stays until you reload the page.',
     ],
   },
   import: {
@@ -305,6 +315,15 @@ function App() {
   const [socialPdfBusy, setSocialPdfBusy] = useState({});
   const [socialDrafts, setSocialDrafts] = useState([]);
   const [socialDraftsGroupBy, setSocialDraftsGroupBy] = useState('day');
+  // Full Audit page (2026-11-03): one Instagram account + one website audited
+  // side by side. The last run lives only here (lost on reload, nothing in the DB).
+  const [fullIgInput, setFullIgInput] = useState('');
+  const [fullSiteInput, setFullSiteInput] = useState('');
+  const [fullCompanyInput, setFullCompanyInput] = useState('');
+  const [fullRun, setFullRun] = useState(null);
+  const [fullCombinedBusy, setFullCombinedBusy] = useState(false);
+  const [fullSitePdfBusy, setFullSitePdfBusy] = useState(false);
+  const fullRunIdRef = useRef(0);
   const [historyGroupBy, setHistoryGroupBy] = useState('day');
   // History tab filter bar (2026-09-21) — 'all' means unfiltered for each.
   // historyNicheFilter holds a category LABEL string (e.g. "Agriculture",
@@ -3147,6 +3166,311 @@ function App() {
     </div>
   );
 
+  // ---- Full Audit page: Instagram + website in one go --------------------
+  // Both audits start together and are tracked separately, so one failing
+  // never blocks the other. The website half is the usual /api/report job
+  // (its status carries the stage line, the queued flag and the key findings),
+  // the Instagram half the usual /api/social/audit job.
+
+  const igStageText = (stage) => {
+    const s = String(stage || '').toLowerCase();
+    if (s.startsWith('analyzing')) return 'Reading the profile and recent posts (Instagram reads take about 2 minutes)';
+    if (s.includes('bio link')) return 'Checking the bio link';
+    if (s.startsWith('writing')) return 'Writing the email, DM and WhatsApp copy';
+    return stage || 'Starting';
+  };
+
+  const patchFullRun = (runId, part, patch) => {
+    setFullRun(prev => (prev && prev.id === runId ? { ...prev, [part]: { ...prev[part], ...patch } } : prev));
+  };
+
+  const runFullSite = async (runId, website, company) => {
+    try {
+      const made = await createPdfReport({
+        website: website.url, company, apiBase: API_BASE, download: false,
+        onProgress: (st) => patchFullRun(runId, 'site', {
+          state: st.queued ? 'queued' : 'running',
+          stage: st.stage || 'Working', jobId: st.job_id,
+        }),
+      });
+      patchFullRun(runId, 'site', {
+        state: 'done', stage: '', jobId: made.job_id, filename: made.filename,
+        findings: made.findings ?? null, keyFindings: made.key_findings || [],
+      });
+    } catch (err) {
+      console.error('Full audit website part failed:', err);
+      patchFullRun(runId, 'site', { state: 'failed', stage: '', error: reportErrorMessage(err) });
+    }
+  };
+
+  const runFullInstagram = async (runId, username, website, company, typedCompany, host) => {
+    const handles = { instagram: `https://www.instagram.com/${username}/` };
+    try {
+      const start = await axios.post(`${API_BASE}/api/social/audit`, {
+        company, handles, website: website ? website.url : '', async_mode: true,
+      });
+      const key = start.data.key;
+      const started = Date.now();
+      for (;;) {
+        await new Promise(r => setTimeout(r, 2000));
+        const prog = await axios.get(`${API_BASE}/api/social/audit/progress`, { params: { key } });
+        if (prog.data.running && prog.data.stage) patchFullRun(runId, 'ig', { stage: igStageText(prog.data.stage) });
+        const res = await axios.get(`${API_BASE}/api/social/audit/result`, { params: { key } });
+        if (res.data.ready) {
+          if (res.data.error) throw new Error(res.data.error);
+          const audit = res.data.results || {};
+          const display = audit.instagram?.profile?.display_name || '';
+          const name = defaultCompany({ typed: typedCompany, displayName: display, host, username });
+          setFullRun(prev => (prev && prev.id === runId ? {
+            ...prev,
+            company: name,
+            ig: {
+              ...prev.ig, state: 'done', stage: '',
+              biz: {
+                company: name, website: website ? website.url : '', handles, phone: '',
+                audit, auditedAt: new Date().toISOString(),
+              },
+            },
+          } : prev));
+          return;
+        }
+        if (Date.now() - started > 10 * 60 * 1000) throw new Error('The Instagram audit is taking too long. Try again later.');
+      }
+    } catch (err) {
+      console.error('Full audit Instagram part failed:', err);
+      patchFullRun(runId, 'ig', { state: 'failed', stage: '', error: err.response?.data?.detail || err.message || 'The Instagram audit failed.' });
+    }
+  };
+
+  const handleFullAudit = async (e) => {
+    if (e) e.preventDefault();
+    const igText = fullIgInput.trim();
+    const siteText = fullSiteInput.trim();
+    if (!igText && !siteText) {
+      alert('Enter an Instagram username, a website link, or both.');
+      return;
+    }
+    const username = igText ? parseInstagramUsername(igText) : null;
+    if (igText && !username) {
+      alert('Enter a valid Instagram username, @username or profile link.');
+      return;
+    }
+    const website = siteText ? normaliseWebsite(siteText) : null;
+    if (siteText && !website) {
+      alert('Enter a public website link, for example acme.com or https://www.acme.com.');
+      return;
+    }
+    const typed = fullCompanyInput.trim();
+    const company = defaultCompany({ typed, host: website?.host, username });
+    fullRunIdRef.current += 1;
+    const runId = fullRunIdRef.current;
+    setFullRun({
+      id: runId, company, username, website,
+      site: website ? { state: 'running', stage: 'Starting' } : { state: 'skipped' },
+      ig: username ? { state: 'running', stage: 'Starting' } : { state: 'skipped' },
+    });
+    await Promise.all([
+      website ? runFullSite(runId, website, company) : null,
+      username ? runFullInstagram(runId, username, website, company, typed, website?.host) : null,
+    ]);
+  };
+
+  const fullAuditRunning = !!fullRun && ['running', 'queued'].some(s => s === fullRun.site.state || s === fullRun.ig.state);
+
+  // Why the combined PDF cannot be made yet ('' when it can).
+  const fullCombinedBlocker = (run) => {
+    if (!run) return 'Run a full audit first.';
+    if (!run.website || !run.username) return 'The combined PDF needs both an Instagram account and a website.';
+    if (run.site.state === 'failed') return 'The website audit failed, so there is nothing to combine.';
+    if (run.ig.state === 'failed') return 'The Instagram audit failed, so there is nothing to combine.';
+    if (run.site.state !== 'done' || run.ig.state !== 'done') return 'Available when both audits are done.';
+    const data = run.ig.biz?.audit?.instagram;
+    if (!data || !data.profile || (!(data.issues || []).length && !data.profile.followers)) {
+      return 'The Instagram profile could not be read, so there is no Instagram audit to combine.';
+    }
+    return '';
+  };
+
+  const handleFullCombinedPdf = async () => {
+    const run = fullRun;
+    if (fullCombinedBusy || fullCombinedBlocker(run)) return;
+    setFullCombinedBusy(true);
+    try {
+      const biz = run.ig.biz;
+      const payload = {
+        ...socialPdfPayload(biz, 'instagram', 'long'),
+        website: run.website.url,
+        // the edited email and the internal scores never go into a client file
+        email: { subject: '', body: '' }, lead_score: null, audience_quality: null,
+        report_job_id: run.site.jobId,
+      };
+      const res = await axios.post(`${API_BASE}/api/combined-pdf`, payload, { responseType: 'blob' });
+      saveBlob(res.data, `${(biz.company || payload.handle || 'Business').replace(/[^A-Za-z0-9]+/g, '-')}-website-and-instagram-audit.pdf`);
+    } catch (err) {
+      alert('Combined PDF failed: ' + await blobErrorMessage(err));
+    } finally {
+      setFullCombinedBusy(false);
+    }
+  };
+
+  const handleFullSitePdf = async () => {
+    const run = fullRun;
+    if (!run || run.site.state !== 'done' || fullSitePdfBusy) return;
+    setFullSitePdfBusy(true);
+    try {
+      await downloadReportPdf({ jobId: run.site.jobId, filename: run.site.filename, apiBase: API_BASE });
+    } catch (err) {
+      alert('Website PDF failed: ' + await blobErrorMessage(err));
+    } finally {
+      setFullSitePdfBusy(false);
+    }
+  };
+
+  const setFullCopy = (platform, channel, field, value) => {
+    setFullRun(prev => {
+      if (!prev || !prev.ig.biz) return prev;
+      const audit = { ...prev.ig.biz.audit };
+      const plat = { ...audit[platform] };
+      plat.outreach = { ...plat.outreach, [channel]: { ...(plat.outreach || {})[channel], [field]: value } };
+      audit[platform] = plat;
+      return { ...prev, ig: { ...prev.ig, biz: { ...prev.ig.biz, audit } } };
+    });
+  };
+
+  const renderFullProgressLine = (label, part) => {
+    if (!part || part.state === 'skipped') {
+      return <p style={{ margin: '4px 0', fontSize: '13px', color: '#94a3b8' }}><strong>{label}:</strong> not requested</p>;
+    }
+    const color = { running: '#64748b', queued: '#f59e0b', done: '#10b981', failed: '#ef4444' }[part.state] || '#64748b';
+    const text = part.state === 'done' ? 'done'
+      : part.state === 'failed' ? 'failed (see below)'
+      : part.state === 'queued' ? (part.stage || 'Queued: waiting for the browser')
+      : (part.stage || 'Working');
+    return (
+      <p style={{ margin: '4px 0', fontSize: '13px', color, display: 'flex', alignItems: 'center', gap: '6px' }} aria-live="polite">
+        {(part.state === 'running' || part.state === 'queued') && <Loader2 size={14} className="spin" />}
+        <strong>{label}:</strong> {text}
+      </p>
+    );
+  };
+
+  const renderFullAudit = () => {
+    const run = fullRun;
+    const blocker = fullCombinedBlocker(run);
+    const siteDone = run?.site.state === 'done';
+    const fullView = {
+      key: 'full',
+      setCopy: setFullCopy,
+      onCombined: () => handleFullCombinedPdf(),
+      combinedReady: !blocker,
+      combinedHint: blocker
+        ? ` Combined: ${blocker}`
+        : ' Combined: the website audit from this page followed by the long Instagram audit in one file, safe to attach.',
+      combinedOptionTitle: blocker || 'The website audit and the Instagram audit in one PDF.',
+      combinedMissingLabel: ['running', 'queued'].includes(run?.site.state)
+        ? 'Combined PDF: website + Instagram audit (website audit not ready)'
+        : 'Combined PDF: website + Instagram audit (not available)',
+    };
+    return (
+      <div className="glass" style={{ padding: '24px' }}>
+        <h2 style={{ margin: 0 }}>Full Audit</h2>
+        <p style={{ color: '#94a3b8', margin: '8px 0 16px' }}>
+          Audit one business's Instagram account and its website together, then download each PDF or one combined PDF.
+          Instagram reads take about 2 minutes; the website audit about a minute.
+        </p>
+
+        <form onSubmit={handleFullAudit} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <input value={fullIgInput} onChange={e => setFullIgInput(e.target.value)} aria-label="Instagram username or profile link"
+            placeholder="Instagram: username, @username or profile link" style={{ flex: '2 1 240px', padding: '10px' }} />
+          <input value={fullSiteInput} onChange={e => setFullSiteInput(e.target.value)} aria-label="Website link"
+            placeholder="Website, e.g. acme.com" style={{ flex: '2 1 220px', padding: '10px' }} />
+          <input value={fullCompanyInput} onChange={e => setFullCompanyInput(e.target.value)} aria-label="Company name (optional)"
+            placeholder="Company name (optional)" style={{ flex: '1 1 160px', padding: '10px' }} />
+          <button type="submit" disabled={fullAuditRunning} className="primary-btn"
+            style={{ background: '#10b981', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold' }}>
+            {fullAuditRunning ? 'Auditing...' : 'Run full audit'}
+          </button>
+        </form>
+        <p style={{ color: '#94a3b8', fontSize: '12px', margin: '0 0 16px' }}>
+          Fill in at least one. With only one, just that audit runs and the combined PDF is off.
+          Company name defaults to the Instagram display name, else the website name.
+        </p>
+
+        {run && (
+          <>
+            <div className="lead-card glass" style={{ marginBottom: '14px' }}>
+              <div className="lead-header"><h3>{run.company || 'Business'}</h3></div>
+              {renderFullProgressLine('Website audit', run.site)}
+              {renderFullProgressLine('Instagram audit', run.ig)}
+              <div style={{ marginTop: '12px' }}>
+                <span title={blocker || 'The website audit followed by the long Instagram audit, safe to attach.'} style={{ display: 'inline-block' }}>
+                  <button type="button" className="send-btn" disabled={!!blocker || fullCombinedBusy}
+                    onClick={handleFullCombinedPdf}
+                    style={{ fontSize: '15px', padding: '10px 18px', pointerEvents: blocker ? 'none' : 'auto' }}>
+                    {fullCombinedBusy ? 'Making combined PDF...' : 'Download combined PDF (website + Instagram)'}
+                  </button>
+                </span>
+                {blocker && <p style={{ color: '#94a3b8', fontSize: '12px', margin: '6px 0 0' }}>{blocker}</p>}
+              </div>
+            </div>
+
+            <div className="leads-grid" style={{ gridTemplateColumns: '1fr' }}>
+              {run.site.state !== 'skipped' && (
+                <div className="lead-card glass">
+                  <div className="lead-header"><h3>Website audit</h3></div>
+                  <div className="lead-details">
+                    <p><strong>Site:</strong> <a href={run.website.url} target="_blank" rel="noreferrer">{run.website.url}</a></p>
+                    {(run.site.state === 'running' || run.site.state === 'queued') && renderFullProgressLine('Status', run.site)}
+                    {run.site.state === 'failed' && (
+                      <p role="alert" style={{ color: '#ef4444', fontSize: '13px' }}>The website audit failed: {run.site.error}</p>
+                    )}
+                    {siteDone && (
+                      <>
+                        <p style={{ fontSize: '13px', color: '#475569', margin: '2px 0' }}>
+                          {run.site.findings === 0 ? 'No findings worth fixing.' : `${run.site.findings} finding${run.site.findings === 1 ? '' : 's'} worth fixing`}
+                          {(run.site.keyFindings || []).length > 0 && run.site.findings > run.site.keyFindings.length ? ` (top ${run.site.keyFindings.length} below)` : ''}
+                        </p>
+                        {(run.site.keyFindings || []).length > 0 && (
+                          <ul style={{ margin: '8px 0', paddingLeft: '18px' }}>
+                            {run.site.keyFindings.map((f, k) => (
+                              <li key={k} style={{ fontSize: '13px', margin: '3px 0' }}>
+                                <span style={{ color: { 'Fix first': '#ef4444', Next: '#f59e0b' }[f.tag] || '#64748b', fontWeight: 700 }}>{f.tag}</span>
+                                {': '}{f.title}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <button type="button" className="send-btn" disabled={fullSitePdfBusy} onClick={handleFullSitePdf} style={{ marginTop: '8px' }}>
+                          {fullSitePdfBusy ? 'Downloading...' : 'Download website PDF'}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {run.ig.state !== 'skipped' && (
+                <div className="lead-card glass">
+                  <div className="lead-header"><h3>Instagram audit</h3></div>
+                  <div className="lead-details">
+                    <p><strong>Profile:</strong>{' '}
+                      <a href={`https://www.instagram.com/${run.username}/`} target="_blank" rel="noreferrer">@{run.username}</a>
+                    </p>
+                    {run.ig.state === 'running' && renderFullProgressLine('Status', run.ig)}
+                    {run.ig.state === 'failed' && (
+                      <p role="alert" style={{ color: '#ef4444', fontSize: '13px' }}>The Instagram audit failed: {run.ig.error}</p>
+                    )}
+                  </div>
+                  {run.ig.state === 'done' && run.ig.biz && renderSocialAuditResult(run.ig.biz, fullView)}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   const renderDrafts = () => {
     const draftGroups = groupByPeriod(drafts, draftsGroupBy);
     const draftsInView = draftGroups.flatMap(g => g.items);
@@ -3958,6 +4282,12 @@ function App() {
             <MessageCircle size={18} /> Social
           </button>
           <button
+            onClick={() => setCurrentView('fullaudit')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'fullaudit' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'fullaudit' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'fullaudit' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <Layers size={18} /> Full Audit
+          </button>
+          <button
             onClick={() => setCurrentView('drafts')}
             style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'drafts' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'drafts' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'drafts' ? 'bold' : 'normal', transition: 'all 0.2s' }}
           >
@@ -4030,6 +4360,7 @@ function App() {
         {currentView === 'home' && renderHome()}
         {currentView === 'agriculture' && renderAgriculture()}
         {currentView === 'social' && renderSocial()}
+        {currentView === 'fullaudit' && renderFullAudit()}
         {currentView === 'drafts' && renderDrafts()}
         {currentView === 'history' && renderHistory()}
         {currentView === 'cost' && renderCost()}
