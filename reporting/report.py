@@ -15,15 +15,11 @@ from html import escape
 from analyzer import design_review
 from analyzer.visuals import _acquire_playwright_slot, _release_playwright_slot
 
-INK = "#2a1f14"
-DARK = "#1f1610"
-CREAM = "#fff8ef"
-PANEL = "#f1e3cf"
-ACCENT = "#d9480f"
-GREEN = "#2f7d4f"
+from reporting import theme
+from reporting.theme import ACCENT, CREAM, DARK, GREEN, INK, PANEL  # noqa: F401  (kept importable)
 
 _RANK = {"serious": 0, "moderate": 1, "minor": 2}
-_TAG = {"serious": "Fix first", "moderate": "Next", "minor": "Worth doing"}
+_TAG = theme.TAG
 
 _PRESENTATION = {
     "hero_video_no_headline": (
@@ -142,6 +138,8 @@ def build_report(company: str, website: str, collected: dict, *, contact_email: 
 
 
 # --------------------------------------------------------------------------- HTML
+# The look (CSS, cover, finding blocks, closing page, footer) lives in
+# reporting/theme.py and is shared with the long Instagram audit.
 
 def _img(data: bytes | None, alt: str, extra_style: str = "") -> str:
     if not data:
@@ -156,82 +154,33 @@ def _finding_block(f: dict) -> str:
     if f.get("image"):
         img = (f'<div style="margin-top:6mm">{_img(f["image"], f["title"])}'
                f'<p class="cap">{escape(f.get("caption") or "")}</p></div>')
-    return (
-        f'<div class="finding"><div class="fhead"><span class="num">{f["number"]:02d}</span>'
-        f'<div><span class="tag t-{escape(f["impact"])}">{escape(f["tag"])}</span>'
-        f'<h2>{escape(f["title"])}</h2></div></div>'
-        f'<div class="cols"><div><h4>What we saw</h4><p>{escape(f["saw"])}</p></div>'
-        f'<div><h4>What we\'d do</h4><p>{escape(f["advice"])}</p></div></div>{img}</div>'
-    )
+    return theme.finding_block(
+        number=f["number"], impact=f["impact"], tag=f["tag"], title=f["title"],
+        columns=[[("What we saw", f["saw"])], [("What we'd do", f["advice"])]], extra=img)
 
 
-_CSS = f"""
-@page {{ size: A4; margin: 0; }}
-* {{ box-sizing: border-box; }}
-body {{ margin:0; font-family: Arial, Helvetica, 'Liberation Sans', sans-serif; color:{INK}; background:{CREAM}; }}
-.page {{ width:210mm; height:297mm; padding:18mm 18mm 16mm; position:relative; overflow:hidden;
-         page-break-after:always; background:{CREAM}; }}
-.page.dark {{ background:{DARK}; color:{CREAM}; }}
-.kicker {{ font-size:9pt; font-weight:bold; letter-spacing:2px; text-transform:uppercase; color:{ACCENT}; margin:0 0 4mm; }}
-h1 {{ font-size:40pt; line-height:1.0; margin:0 0 6mm; text-transform:uppercase; letter-spacing:-0.5px; }}
-h1.big {{ font-size:54pt; color:#f6c9a8; }}
-h2 {{ font-size:18pt; line-height:1.15; margin:1mm 0 0; text-transform:uppercase; }}
-h4 {{ font-size:8pt; letter-spacing:2px; text-transform:uppercase; color:{ACCENT}; margin:0 0 2mm; }}
-p {{ font-size:10.5pt; line-height:1.55; margin:0 0 3mm; }}
-.cap {{ font-size:8.5pt; color:#6b5a48; margin:2mm 0 0; }}
-.footer {{ position:absolute; left:18mm; right:18mm; bottom:9mm; display:flex; justify-content:space-between;
-           font-size:8pt; letter-spacing:1px; text-transform:uppercase; color:#8a7a68; }}
-.dark .footer {{ color:#a99884; }}
-.finding {{ margin-bottom:9mm; }}
-.fhead {{ display:flex; gap:6mm; align-items:flex-start; margin-bottom:4mm; }}
-.num {{ font-size:34pt; font-weight:bold; color:{ACCENT}; line-height:1; min-width:17mm; }}
-.tag {{ display:inline-block; font-size:7.5pt; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase;
-        padding:1mm 3mm; border-radius:10mm; background:{PANEL}; color:{INK}; }}
-.tag.t-serious {{ background:{ACCENT}; color:#fff; }}
-.cols {{ display:flex; gap:8mm; }} .cols > div {{ flex:1; }}
-.box {{ background:{DARK}; color:{CREAM}; border-radius:4mm; padding:7mm; }}
-.box p {{ color:{CREAM}; }}
-.ok {{ list-style:none; padding:0; margin:0; }}
-.ok li {{ font-size:10pt; line-height:1.5; padding:2.4mm 0 2.4mm 7mm; border-bottom:1px solid {PANEL}; position:relative; }}
-.ok li:before {{ content:''; position:absolute; left:0; top:4.2mm; width:2.6mm; height:2.6mm; border-radius:50%; background:{GREEN}; }}
-.first {{ counter-reset:n; list-style:none; padding:0; margin:0; }}
-.first li {{ position:relative; padding:0 0 5mm 13mm; font-size:10.5pt; line-height:1.5; }}
-.first li:before {{ counter-increment:n; content:counter(n,decimal-leading-zero); position:absolute; left:0; top:-1mm;
-                    font-size:17pt; font-weight:bold; color:{ACCENT}; }}
-.first b {{ display:block; font-size:11.5pt; }}
-.app li {{ font-size:10pt; line-height:1.5; margin-bottom:3mm; }}
-.cta {{ background:{ACCENT}; color:#fff; border-radius:4mm; padding:8mm; margin-top:10mm; }}
-.cta p {{ color:#fff; font-size:12pt; }} .cta h2 {{ color:#fff; margin-bottom:3mm; }}
-"""
-
-
-def _footer(left: str, n: int) -> str:
-    return f'<div class="footer"><span>{escape(left)}</span><span>{n:02d}</span></div>'
+_CSS = theme.CSS
+_footer = theme.footer
 
 
 def render_html(report: dict) -> str:
     """The whole report as one self-contained HTML document (images inlined)."""
     company, website = report["company"], report["website"]
     findings = report["findings"]
-    brand = "MMGA Agency"
+    brand = theme.BRAND
     pages: list[str] = []
     n = 1
 
-    pages.append(
-        f'<section class="page dark"><p class="kicker">Design &amp; conversion review - {escape(report["date"])}</p>'
-        f'<div style="margin-top:34mm"><p class="kicker" style="color:#f6c9a8">A free review for</p>'
-        f'<h1 class="big">{escape(company)}</h1>'
-        f'<p style="font-size:13pt;letter-spacing:3px;text-transform:uppercase;color:{ACCENT};font-weight:bold">'
-        f'{escape(website)}</p>'
-        f'<p style="font-size:13pt;max-width:120mm;margin-top:10mm">What a first-time visitor sees on your home '
-        f'page, what makes them trust you, and what stands between them and getting in touch.</p></div>'
-        f'<div class="footer"><span>Prepared by MMGA Agency, Mumbai</span><span>{len(findings)} findings</span></div></section>'
-    )
+    pages.append(theme.cover(
+        kicker=f"Design & conversion review - {report['date']}", name=company, subline=website,
+        intro=("What a first-time visitor sees on your home page, what makes them trust you, "
+               "and what stands between them and getting in touch."),
+        footer_right=f"{len(findings)} findings"))
     n += 1
 
     top = findings[:3]
-    firsts = "".join(f"<li><b>{escape(f['title'])}</b>{escape(f['advice'])}</li>" for f in top) or (
-        "<li><b>Nothing urgent</b>The measurements below found no serious problem.</li>")
+    steps = [(f["title"], f["advice"]) for f in top]
+    firsts = theme.first_list(steps or [("Nothing urgent", "The measurements below found no serious problem.")])
     works = "".join(f"<li>{escape(p)}</li>" for p in report["positives"]) or (
         "<li>We found nothing we could confirm as a clear strength from measurements alone.</li>")
     pages.append(
@@ -240,7 +189,7 @@ def render_html(report: dict) -> str:
         f'<p style="max-width:150mm">We looked at your home page the way a new visitor would, on a desktop and on a '
         f'phone, and measured what we saw. Every point below rests on a number or a screenshot, not on opinion.</p>'
         f'<div class="cols" style="margin-top:8mm"><div class="box"><h4>Do these first</h4>'
-        f'<ol class="first" style="color:{CREAM}">{firsts}</ol></div>'
+        f'{firsts}</div>'
         f'<div><h4>Already working, keep it</h4><ul class="ok">{works}</ul></div></div>'
         f'{_footer(brand, n)}</section>'
     )
@@ -275,20 +224,9 @@ def render_html(report: dict) -> str:
         )
         n += 1
 
-    contact = escape(report.get("contact_email") or "")
-    reply = (f"Reply to this email" if not contact else f"Reply to this email or write to {contact}")
-    pages.append(
-        f'<section class="page dark"><p class="kicker">Where to start</p><h1>What we\'d do first</h1>'
-        f'<ol class="first" style="color:{CREAM}">'
-        + "".join(f"<li><b>{escape(f['title'])}</b>{escape(f['advice'])}</li>" for f in top)
-        + f'</ol><div class="cta"><h2>Want us to do it?</h2><p>{reply} and we\'ll send a fixed quote for '
-        f'whichever part you\'d like to start with. No call needed.</p></div>'
-        f'<div class="footer"><span>MMGA Agency - mmga.agency</span><span>{n:02d}</span></div></section>'
-    )
+    pages.append(theme.closing_page(steps, contact_email=report.get("contact_email") or "", number=n))
 
-    return (f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
-            f'<title>Design and conversion review for {escape(company)}</title><style>{_CSS}</style></head>'
-            f'<body>{"".join(pages)}</body></html>')
+    return theme.document(f"Design and conversion review for {company}", pages)
 
 
 # --------------------------------------------------------------------------- PDF
