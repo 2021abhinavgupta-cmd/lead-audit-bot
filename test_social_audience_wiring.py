@@ -80,7 +80,7 @@ def _suspect_profile(**over):
     return SocialProfile(**base)
 
 
-def _run(monkeypatch, profile):
+def _run(monkeypatch, profile, rate_key=None):
     monkeypatch.setattr(app_module.config, "API_KEY", None)
     monkeypatch.setitem(app_module._SOCIAL_ADAPTERS, "instagram", lambda handle: profile)
     prompts = []
@@ -94,8 +94,11 @@ def _run(monkeypatch, profile):
 
     monkeypatch.setattr(app_module, "generate_social_outreach", outreach)
     with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        # rate_key: its own rate limit bucket (the route allows 10 a minute
+        # and the social test files together post more than that)
         r = client.post("/api/social/audit", json={"company": "Acme Candles",
-                                                   "handles": {"instagram": "https://instagram.com/acme"}})
+                                                   "handles": {"instagram": "https://instagram.com/acme"}},
+                        headers={"X-API-Key": rate_key} if rate_key else None)
         assert r.status_code == 200, r.text
         return r.json()["results"]["instagram"], prompts
 
@@ -139,6 +142,15 @@ def test_no_reach_line_without_the_low_likes_signal(monkeypatch):
     for prompt in prompts:
         assert "follow back" not in prompt
         assert not ACCUSATION.search(prompt)
+
+
+def test_route_returns_the_typical_post_summary_for_the_pdfs(monkeypatch):
+    prof = _suspect_profile(engagement_known=True,
+                            recent_posts=[_post(l, 1) for l in (60, 55, 62, 58, 61, 5000)])
+    res, _ = _run(monkeypatch, prof, rate_key="engagement-1")
+    assert res["engagement"] == {"median_likes": 60.5, "median_comments": 1, "posts_read": 6}
+    res, _ = _run(monkeypatch, _suspect_profile(), rate_key="engagement-2")   # engagement not known
+    assert res["engagement"] is None
 
 
 def test_unanalyzed_and_missing_profiles_get_unknown_audience(monkeypatch):

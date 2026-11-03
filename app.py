@@ -9,7 +9,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote as _urlquote
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,7 +37,7 @@ from analyzer.visuals import (
 from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
 from analyzer.audience_quality import audience_quality, outreach_issue as audience_outreach_issue
-from analyzer.social_audit import audit_profile, generate_social_outreach, lead_score
+from analyzer.social_audit import audit_profile, engagement_summary, generate_social_outreach, lead_score
 from analyzer.social_link import check_bio_link
 from scrapers.social.discover import find_social_handles
 from scrapers.social.instagram import fetch_instagram
@@ -56,6 +56,7 @@ from importer import audit_runner
 from importer import presend_gate
 from reporting import collect as reporting_collect
 from reporting import report as reporting_report
+from reporting import social_pdf as reporting_social_pdf
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -2290,6 +2291,8 @@ async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None
             "link_check": link_check,
             "lead_score": lead_score(profile, issues, audience=audience),
             "audience_quality": audience,
+            # the typical (median) post, for the Social tab and its PDFs
+            "engagement": engagement_summary(profile),
         }
 
     return {"results": results}
@@ -2816,6 +2819,97 @@ async def draft_pdf(
     name = re.sub(r"[^A-Za-z0-9]+", "-", req.company or "draft").strip("-") or "draft"
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="{name}-email.pdf"'})
+
+
+# --- Social tab PDFs ------------------------------------------------------------
+# Small: internal summary (email, profile, lead score, issues, Internal audience
+# quality). Long: client facing audit, safe to attach for the prospect (never
+# the lead score, audience quality, notes or the email). HTML lives in
+# reporting/social_pdf.py; every string is escaped there.
+
+class SocialPdfProfile(BaseModel):
+    followers: int | None = Field(default=None, ge=0)
+    following: int | None = Field(default=None, ge=0)
+    posts_count: int | None = Field(default=None, ge=0)
+    bio: str = Field(default="", max_length=2000)
+    note: str = Field(default="", max_length=1000)
+    engagement_rate: float | None = Field(default=None, ge=0, le=100000)
+    median_likes: float | None = Field(default=None, ge=0)
+    median_comments: float | None = Field(default=None, ge=0)
+    posts_read: int | None = Field(default=None, ge=0, le=1000)
+    link_in_bio: bool | None = None
+
+
+class SocialPdfIssue(BaseModel):
+    severity: str = Field(default="", max_length=10)
+    label: str = Field(default="", max_length=200)
+    detail: str = Field(default="", max_length=1000)
+
+
+class SocialPdfEmail(BaseModel):
+    subject: str = Field(default="", max_length=300)
+    body: str = Field(default="", max_length=10000)
+
+
+class SocialPdfLeadScore(BaseModel):
+    score: int | None = None
+    label: str = Field(default="", max_length=50)
+    reasons: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=20)
+
+
+class SocialPdfSignal(BaseModel):
+    detail: str = Field(default="", max_length=1000)
+
+
+class SocialPdfAudience(BaseModel):
+    label: str = Field(default="", max_length=50)
+    score: int | None = None
+    signals: list[SocialPdfSignal] = Field(default_factory=list, max_length=30)
+
+
+class SocialPdfRequest(BaseModel):
+    mode: Literal["small", "long"]
+    company: str = Field(default="", max_length=200)
+    platform: str = Field(default="", max_length=30)
+    handle: str = Field(default="", max_length=100)
+    profile_url: str = Field(default="", max_length=500)
+    website: str = Field(default="", max_length=500)
+    profile: SocialPdfProfile = Field(default_factory=SocialPdfProfile)
+    issues: list[SocialPdfIssue] = Field(default_factory=list, max_length=50)
+    email: SocialPdfEmail = Field(default_factory=SocialPdfEmail)
+    lead_score: SocialPdfLeadScore | None = None
+    audience_quality: SocialPdfAudience | None = None
+    timestamp: str = Field(default="", max_length=100)
+
+
+SOCIAL_PDF_RATE_LIMIT = rate_limit(10, 60)
+
+
+@app.post("/api/social-pdf")
+async def social_pdf(
+    req: SocialPdfRequest,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(SOCIAL_PDF_RATE_LIMIT),
+):
+    data = req.model_dump()
+    if not reporting_social_pdf.has_content(data):
+        raise HTTPException(status_code=400, detail="Nothing to put in this PDF.")
+    if req.mode == "small":
+        page = reporting_social_pdf.build_small_html(data)
+    else:
+        page = reporting_social_pdf.build_long_html(
+            data,
+            sender_name=os.getenv("YOUR_NAME", "Kshitij Gupta"),
+            sender_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
+        )
+    try:
+        pdf = await reporting_report.render_pdf(page, margin_mm=14)
+    except Exception as ex:
+        print(f"[SocialPdf] failed: {ex}")
+        raise HTTPException(status_code=500, detail="The PDF could not be created.")
+    name = re.sub(r"[^A-Za-z0-9]+", "-", req.company or req.handle or "social").strip("-") or "social"
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-social-{req.mode}.pdf"'})
 
 
 # Mount screenshots folder
