@@ -1,4 +1,5 @@
 """The PDF report routes: validation, the job lifecycle, download, and no path tricks."""
+import asyncio
 import time
 import uuid
 
@@ -18,7 +19,7 @@ def client(monkeypatch, tmp_path):
 
 
 def _fake_pipeline(monkeypatch, *, fail=None):
-    async def collect(website):
+    async def collect(website, **_):
         if fail:
             raise RuntimeError(fail)
         return {"final_url": website, "design_probe": None}
@@ -56,7 +57,7 @@ def test_a_bare_domain_gets_https(client, monkeypatch):
     _fake_pipeline(monkeypatch)
     seen = []
 
-    async def collect(website):
+    async def collect(website, **_):
         seen.append(website)
         return {"final_url": website}
 
@@ -87,6 +88,108 @@ def test_unknown_and_malformed_job_ids_are_404_never_a_file_read(client):
     assert client.get("/api/report/" + "0" * 32).status_code == 404
     assert client.get("/api/report/..%2F..%2Fetc%2Fpasswd/pdf").status_code in (404, 405)
     assert client.get("/api/report/not-a-job/pdf").status_code == 404
+
+
+def test_a_finished_job_exposes_its_key_findings_by_title(client, monkeypatch):
+    # The Full Audit page shows these instead of auditing the site a second time.
+    _fake_pipeline(monkeypatch)
+
+    async def collect(website, **_):
+        return {"final_url": website, "mobile_overflow": True, "mobile_scroll_width": 520}
+
+    monkeypatch.setattr(app_module.reporting_collect, "collect", collect)
+    with client:
+        job = client.post("/api/report", json={"website": "acme.com"}).json()
+        done = _wait_done(client, job["job_id"])
+    assert done["status"] == "done" and done["findings"] == 1
+    assert done["key_findings"] == [{"title": "On a phone the page scrolls sideways", "tag": "Next"}]
+    assert done["queued"] is False
+
+
+def test_key_findings_are_capped_at_five(client, monkeypatch):
+    _fake_pipeline(monkeypatch)
+    many = [{"key": f"k{i}", "title": f"Finding {i}", "saw": "", "advice": "", "impact": "moderate",
+             "image": None, "caption": "", "number": i, "tag": "Next"} for i in range(8)]
+    monkeypatch.setattr(app_module.reporting_report, "build_report",
+                        lambda *a, **k: {"company": "Acme", "findings": many})
+    monkeypatch.setattr(app_module.reporting_report, "render_html", lambda built: "<html></html>")
+    with client:
+        job = client.post("/api/report", json={"website": "acme.com"}).json()
+        done = _wait_done(client, job["job_id"])
+    assert done["findings"] == 8
+    assert [f["title"] for f in done["key_findings"]] == [f"Finding {i}" for i in range(5)]
+
+
+def test_a_job_waiting_for_the_browser_says_queued_then_moves_on(client, monkeypatch):
+    # The single browser slot is busy: the job is waiting, not failing.
+    _fake_pipeline(monkeypatch)
+    gate = {"open": False}
+
+    async def collect(website, on_stage=None):
+        on_stage("queued")
+        while not gate["open"]:
+            await asyncio.sleep(0.01)
+        on_stage("visiting")
+        return {"final_url": website}
+
+    monkeypatch.setattr(app_module.reporting_collect, "collect", collect)
+    with client:
+        job = client.post("/api/report", json={"website": "acme.com"}).json()
+        end = time.time() + 5
+        while True:
+            st = client.get(f"/api/report/{job['job_id']}").json()
+            if st.get("queued"):
+                break
+            assert time.time() < end, st
+            time.sleep(0.02)
+        assert st["status"] == "running" and "waiting" in st["stage"].lower()
+        gate["open"] = True
+        done = _wait_done(client, job["job_id"])
+    assert done["status"] == "done" and done["queued"] is False
+
+
+def test_a_running_job_reports_a_stage_line(client, monkeypatch):
+    _fake_pipeline(monkeypatch)
+    gate = {"open": False}
+
+    async def collect(website, on_stage=None):
+        on_stage("visiting")
+        while not gate["open"]:
+            await asyncio.sleep(0.01)
+        return {"final_url": website}
+
+    monkeypatch.setattr(app_module.reporting_collect, "collect", collect)
+    with client:
+        job = client.post("/api/report", json={"website": "acme.com"}).json()
+        end = time.time() + 5
+        while True:
+            st = client.get(f"/api/report/{job['job_id']}").json()
+            if st.get("stage") and "visiting" in st["stage"].lower():
+                break
+            assert time.time() < end, st
+            time.sleep(0.02)
+        assert st["queued"] is False
+        gate["open"] = True
+        _wait_done(client, job["job_id"])
+
+
+async def test_collect_reports_queued_and_visiting_from_the_browser_slot(monkeypatch):
+    from analyzer import visuals
+    from reporting import collect as collect_mod
+    stages = []
+
+    class Stop(Exception):
+        pass
+
+    async def acquire(on_queued=None, on_started=None):
+        on_queued()
+        on_started()
+        raise Stop()
+
+    monkeypatch.setattr(visuals, "_acquire_playwright_slot", acquire)
+    with pytest.raises(Stop):
+        await collect_mod.collect("https://acme.example", on_stage=stages.append)
+    assert stages == ["queued", "visiting"]
 
 
 def test_the_routes_require_the_api_key():

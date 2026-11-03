@@ -66,7 +66,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "validate_public_url", lambda url: None)
     app_module._report_jobs.clear()
 
-    async def collect(website):
+    async def collect(website, **_):
         got["collected"].append(website)
         if got.get("fail"):
             raise RuntimeError(got["fail"])

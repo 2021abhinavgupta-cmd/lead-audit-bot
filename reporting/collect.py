@@ -61,12 +61,23 @@ async def _shot(page) -> bytes | None:
         return None
 
 
-async def collect(website: str) -> dict:
+async def collect(website: str, on_stage=None) -> dict:
     """
     Visit `website` and return the raw material for a report. Raises only when
     the page cannot be loaded at all; every individual measurement that fails
     simply comes back empty.
+
+    `on_stage(name)`, when given, hears "queued" (the one browser slot is busy,
+    so this visit waits), "visiting" (the browser slot was taken) and
+    "checking" (the browser is done, the search probes run).
     """
+    def _stage(name):
+        if on_stage is not None:
+            try:
+                on_stage(name)
+            except Exception as e:  # a progress line must never break a report
+                print(f"[Report] stage callback failed (non-critical): {e}")
+
     out: dict = {
         "final_url": website, "html": "", "response_headers": {},
         "desktop_image": None, "mobile_image": None, "card_image": None, "card_label": "",
@@ -74,7 +85,8 @@ async def collect(website: str) -> dict:
         "mobile_overflow": None, "mobile_scroll_width": None, "text_renderable": True,
         "seo_findings": [], "design_shots": {},
     }
-    sem = await visuals._acquire_playwright_slot()
+    sem = await visuals._acquire_playwright_slot(
+        on_queued=lambda: _stage("queued"), on_started=lambda: _stage("visiting"))
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -143,6 +155,7 @@ async def collect(website: str) -> dict:
         visuals._release_playwright_slot(sem)
 
     # Search-visibility probes need no browser.
+    _stage("checking")
     try:
         html, final = out["html"], out["final_url"]
         found = seo_probes.html_findings(html, final) + seo_probes.header_findings(out["response_headers"])

@@ -2666,10 +2666,26 @@ def _report_slug(text: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in (text or "").lower()).strip("-")[:40] or "site"
 
 
+# Progress lines for a running report job, keyed by reporting.collect's stage
+# names. "queued" means the one shared browser slot is busy: the job waits, it
+# has not failed (the Full Audit page shows it as "queued").
+_REPORT_STAGE_TEXT = {
+    "queued": "Queued: waiting for the browser (another audit is using it)",
+    "visiting": "Visiting the website on a desktop and a phone",
+    "checking": "Checking search visibility",
+}
+_REPORT_KEY_FINDINGS = 5
+
+
 async def _run_report_job(job_id: str, website: str, company: str) -> None:
     job = _report_jobs[job_id]
+
+    def on_stage(name: str) -> None:
+        job.update(stage=_REPORT_STAGE_TEXT.get(name, job.get("stage", "")), queued=(name == "queued"))
+
     try:
-        collected = await reporting_collect.collect(website)
+        collected = await reporting_collect.collect(website, on_stage=on_stage)
+        job.update(stage="Writing the PDF", queued=False)
         built = reporting_report.build_report(
             company, website, collected,
             contact_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
@@ -2680,13 +2696,17 @@ async def _run_report_job(job_id: str, website: str, company: str) -> None:
         with open(path, "wb") as fh:
             fh.write(pdf)
         job.update(status="done", path=path, findings=len(built["findings"]),
-                   filename=f"MMGA-review-{_report_slug(built['company'])}.pdf")
+                   key_findings=[{"title": f.get("title", ""), "tag": f.get("tag", "")}
+                                 for f in built["findings"][:_REPORT_KEY_FINDINGS]],
+                   filename=f"MMGA-review-{_report_slug(built['company'])}.pdf",
+                   stage="", queued=False)
     except asyncio.CancelledError:
-        job.update(status="failed", error="Cancelled.")
+        job.update(status="failed", error="Cancelled.", stage="", queued=False)
         raise
     except Exception as e:
         print(f"[Report] job {job_id} failed: {e}")
-        job.update(status="failed", error=str(e)[:300] or "The report could not be created.")
+        job.update(status="failed", error=str(e)[:300] or "The report could not be created.",
+                   stage="", queued=False)
 
 
 @app.post("/api/report")
@@ -2707,7 +2727,8 @@ async def create_report(
         _report_jobs.pop(old, None)
     job_id = uuid.uuid4().hex
     # website is recorded so /api/combined-pdf can check a job belongs to the site it is merged for
-    _report_jobs[job_id] = {"status": "running", "created": now, "website": website}
+    _report_jobs[job_id] = {"status": "running", "created": now, "website": website,
+                            "stage": "Starting", "queued": False}
     task = asyncio.create_task(_run_report_job(job_id, website, req.company))
     _report_tasks.add(task)
     task.add_done_callback(_report_tasks.discard)
@@ -2723,7 +2744,9 @@ async def report_status(
     job = _report_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="No such report job (it may have expired).")
-    return {k: job.get(k) for k in ("status", "error", "findings", "filename")}
+    out = {k: job.get(k) for k in ("status", "error", "findings", "filename", "stage", "key_findings")}
+    out["queued"] = bool(job.get("queued"))
+    return out
 
 
 @app.get("/api/report/{job_id}/pdf")
